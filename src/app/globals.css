@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink: #0D0F14;
+  --slate: #1C2033;
+  --mist: #2D3250;
+  --azure: #4A7AFF;
+  --cyan: #00D4FF;
+  --sage: #00E5A0;
+  --amber: #FFB830;
+  --rose: #FF4D6D;
+  --ghost: #8B92A9;
+  --snow: #F0F2F8;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: var(--ink);
+    color: var(--snow);
+    font-family: var(--font-body), system-ui, sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-slate border border-mist rounded-xl p-6;
+  }
+
+  .card-hover {
+    @apply card transition-all duration-200 hover:border-azure/40 hover:shadow-lg hover:shadow-azure/5;
+  }
+
+  .btn-primary {
+    @apply bg-azure hover:bg-azure/90 text-white font-semibold px-5 py-2.5 rounded-lg transition-all duration-150 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply bg-mist hover:bg-mist/80 text-snow font-medium px-5 py-2.5 rounded-lg transition-all duration-150 border border-ghost/20;
+  }
+
+  .btn-ghost {
+    @apply hover:bg-mist text-ghost hover:text-snow font-medium px-4 py-2 rounded-lg transition-all duration-150;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold;
+  }
+
+  .input {
+    @apply bg-mist border border-ghost/20 text-snow placeholder-ghost rounded-lg px-4 py-2.5 w-full focus:outline-none focus:border-azure focus:ring-1 focus:ring-azure transition-colors;
+  }
+
+  .status-pending    { @apply badge bg-amber/15 text-amber; }
+  .status-processing { @apply badge bg-cyan/15 text-cyan; }
+  .status-matched    { @apply badge bg-sage/15 text-sage; }
+  .status-discrepancy { @apply badge bg-rose/15 text-rose; }
+  .status-approved   { @apply badge bg-sage/20 text-sage; }
+  .status-rejected   { @apply badge bg-rose/20 text-rose; }
+  .status-paid       { @apply badge bg-azure/15 text-azure; }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--slate); }
+::-webkit-scrollbar-thumb { background: var(--mist); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ghost); }
+
+/* Upload dropzone shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, var(--slate) 25%, var(--mist) 50%, var(--slate) 75%);
+  background-size: 200% auto;
+  animation: shimmer 2s linear infinite;
+}
