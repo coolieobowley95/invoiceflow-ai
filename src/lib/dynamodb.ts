@@ -23,39 +23,93 @@ export type InvoiceStatus =
   | "PAID"
 
 
-export interface Invoice {
-  id: string
-  uploadedAt: string
-  fileName: string
-  vendorName: string
-  vendorEmail?: string
-  invoiceNumber: string
-  invoiceDate: string
-  dueDate: string
-  totalAmount: number
-  currency: string
-  lineItems: any[]
-  status: InvoiceStatus
-  matchedPOId?: string
-  discrepancies?: any[]
-  approvedBy?: string
-  approvedAt?: string
-  rejectedReason?: string
-  aiConfidence: number
-  rawText?: string
-  notes?: string
+// Shared invoice line item type
+export interface LineItem {
+  description: string
+  quantity: number
+  unitPrice: number
+  total: number
 }
 
 
-export interface PurchaseOrder {
+// Discrepancy type
+export interface Discrepancy {
+  field: string
+  invoiceValue: string | number
+  poValue: string | number
+  severity: "LOW" | "MEDIUM" | "HIGH"
+}
+
+
+// Invoice type
+export interface Invoice {
+
   id: string
-  poNumber: string
+
+  uploadedAt: string
+
+  fileName: string
+
   vendorName: string
-  createdAt: string
+
+  vendorEmail?: string
+
+  invoiceNumber: string
+
+  invoiceDate: string
+
+  dueDate: string
+
   totalAmount: number
+
   currency: string
-  lineItems: any[]
-  status: string
+
+  lineItems: LineItem[]
+
+  status: InvoiceStatus
+
+  matchedPOId?: string
+
+  discrepancies?: Discrepancy[]
+
+  approvedBy?: string
+
+  approvedAt?: string
+
+  rejectedReason?: string
+
+  aiConfidence: number
+
+  rawText?: string
+
+  notes?: string
+
+}
+
+
+// Purchase order type
+export interface PurchaseOrder {
+
+  id: string
+
+  poNumber: string
+
+  vendorName: string
+
+  createdAt: string
+
+  totalAmount: number
+
+  currency: string
+
+  lineItems: LineItem[]
+
+  status:
+    | "OPEN"
+    | "PARTIALLY_INVOICED"
+    | "FULLY_INVOICED"
+    | "CLOSED"
+
 }
 
 
@@ -70,71 +124,80 @@ export async function putInvoice(invoice: Invoice) {
 
 
 // GET
-export async function getInvoice(id:string){
+export async function getInvoice(id: string) {
 
-  const {data} = await supabase
+  const { data } = await supabase
     .from(TABLES.INVOICES)
     .select("*")
-    .eq("id",id)
+    .eq("id", id)
     .single()
 
-  return data
+
+  return data as Invoice | null
 
 }
 
 
 // UPDATE STATUS
 export async function updateInvoiceStatus(
-id:string,
-status:InvoiceStatus,
-extra?:Partial<Invoice>
+  id: string,
+  status: InvoiceStatus,
+  extra?: Partial<Invoice>
 ){
 
-return await supabase
-.from(TABLES.INVOICES)
-.update({
-  status,
-  ...extra
-})
-.eq("id",id)
+  return await supabase
+    .from(TABLES.INVOICES)
+    .update({
+      status,
+      ...extra
+    })
+    .eq("id", id)
 
 }
 
 
 // LIST
 export async function listInvoices(
-status?:InvoiceStatus
+  status?: InvoiceStatus
 ){
 
-let query = supabase
-.from(TABLES.INVOICES)
-.select("*")
-.order("uploadedAt",{ascending:false})
+  let query = supabase
+    .from(TABLES.INVOICES)
+    .select("*")
+    .order("uploadedAt", {
+      ascending:false
+    })
 
 
-if(status){
- query=query.eq("status",status)
+  if(status){
+
+    query = query.eq(
+      "status",
+      status
+    )
+
+  }
+
+
+  const { data } = await query
+
+
+  return (data || []) as Invoice[]
+
 }
 
-
-const {data}=await query
-
-
-return data || []
-
-}
 
 
 // PURCHASE ORDERS
 
 export async function listPurchaseOrders(){
 
-const {data}=await supabase
-.from(TABLES.PURCHASE_ORDERS)
-.select("*")
+  const { data } = await supabase
+    .from(TABLES.PURCHASE_ORDERS)
+    .select("*")
 
 
-return data || []
+  return (data || []) as PurchaseOrder[]
 
 }
 
@@ -142,13 +205,13 @@ return data || []
 
 export async function getPurchaseOrder(id:string){
 
-const {data}=await supabase
-.from(TABLES.PURCHASE_ORDERS)
-.select("*")
-.eq("id",id)
-.single()
+  const { data } = await supabase
+    .from(TABLES.PURCHASE_ORDERS)
+    .select("*")
+    .eq("id", id)
+    .single()
 
 
-return data
+  return data as PurchaseOrder | null
 
 }
