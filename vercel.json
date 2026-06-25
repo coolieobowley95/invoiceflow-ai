@@ -2,13 +2,5 @@
   "framework": "nextjs",
   "buildCommand": "npm run build",
   "devCommand": "npm run dev",
-  "installCommand": "npm install",
-  "env": {
-    "AWS_REGION": "@aws-region",
-    "AWS_ACCESS_KEY_ID": "@aws-access-key-id",
-    "AWS_SECRET_ACCESS_KEY": "@aws-secret-access-key",
-    "DYNAMODB_TABLE_NAME": "@dynamodb-table-name",
-    "DYNAMODB_PO_TABLE_NAME": "@dynamodb-po-table-name",
-    "OPENAI_API_KEY": "@openai-api-key"
-  }
+  "installCommand": "npm install"
 }
