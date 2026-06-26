@@ -4,15 +4,21 @@
  * Upload page — async/polling architecture.
  *
  * Flow:
- *  1. User drops/selects a file → handleUpload()
- *  2. POST /api/upload → returns { invoiceId } in ~300 ms (202 Accepted)
- *  3. useJobPolling(invoiceId) begins polling GET /api/status/:id
- *  4. UI transitions through stages as the backend updates the DB
- *  5. Terminal state → success card or soft error with dashboard CTA
+ *  1. User drops/selects a file → handleFile()
+ *  2. User clicks "Process Invoice" → handleSubmit()
+ *  3. POST /api/upload → returns { invoiceId } in ~300 ms (202 Accepted)
+ *  4. setJobId() (validated) triggers useJobPolling(invoiceId) in a useEffect
+ *  5. UI transitions through stages as the backend updates the DB
+ *  6. Terminal state → success card or soft error with dashboard CTA
+ *
+ * Safe-exit:
+ *  - The "<- Back" link (and any safe-exit trigger) resets all transient state
+ *    (file, jobId, errorMsg, doneResult) and clears `phase` to 'idle' BEFORE
+ *    navigating away. This prevents the polling hook from continuing with a
+ *    stale jobId reference if the user re-mounts the page.
  */
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
 import { Upload, FileText, ArrowLeft, CheckCircle, AlertCircle, X, LayoutDashboard } from 'lucide-react'
 import { useJobPolling, type ProcessingStage, type JobStatusResponse } from '@/hooks/useJobPolling'
 
@@ -125,7 +131,6 @@ function ProcessingTimeline({ currentStage }: { currentStage: ProcessingStage })
               ${isPending ? 'opacity-30' : ''}
             `}
           >
-            {/* Status indicator */}
             <div className="flex-shrink-0 mt-0.5">
               {isDone ? (
                 <CheckCircle className="w-4 h-4 text-sage" />
@@ -136,7 +141,6 @@ function ProcessingTimeline({ currentStage }: { currentStage: ProcessingStage })
               )}
             </div>
 
-            {/* Label + description */}
             <div>
               <p className={`text-sm font-semibold ${isActive ? 'text-snow' : 'text-ghost'}`}>
                 {stage.label}
@@ -176,12 +180,10 @@ function SuccessCard({
         </div>
       </div>
 
-      {/* Outcome badge */}
       <div className="bg-mist rounded-lg p-4 mb-4">
         <p className={`text-sm font-medium ${copy.color}`}>{copy.label}</p>
       </div>
 
-      {/* Key fields */}
       {result.totalAmount != null && result.totalAmount > 0 && (
         <div className="grid grid-cols-2 gap-3 mb-5">
           <Stat label="Amount" value={`${result.currency ?? 'USD'} ${result.totalAmount.toLocaleString()}`} />
@@ -249,7 +251,6 @@ function ErrorCard({
   )
 }
 
-// Inline spinner SVG (avoids lucide-react dependency on a missing icon)
 function SpinnerIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -264,7 +265,8 @@ function SpinnerIcon({ className }: { className?: string }) {
 type UploadPhase = 'idle' | 'uploading' | 'polling' | 'done' | 'error'
 
 export default function UploadPage() {
-  const fileInputRef  = useRef<HTMLInputElement>(null)
+  const router           = useRouter()
+  const fileInputRef     = useRef<HTMLInputElement>(null)
   const [file, setFile]       = useState<File | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [phase, setPhase]     = useState<UploadPhase>('idle')
@@ -272,17 +274,37 @@ export default function UploadPage() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [doneResult, setDoneResult] = useState<JobStatusResponse | null>(null)
 
-  // Polling is active only when we have a jobId and phase === 'polling'
-  const pollState = useJobPolling(phase === 'polling' ? jobId : null, {
-    onComplete: result => {
-      setPhase('done')
-      setDoneResult(result)
-    },
-    onError: msg => {
-      setPhase('error')
-      setErrorMsg(msg)
-    },
+  // FIX (Process Invoice): The polling hook is now driven directly by jobId.
+  // Previously, the hook was gated on `phase === 'polling' ? jobId : null`,
+  // which produced a race condition: on the same render where the API
+  // response arrived, setJobId(...) and setPhase('polling') were called
+  // back-to-back, but the hook observed `null` (because phase was still
+  // 'uploading') and never started polling — leading to the
+  // "Job not found" error. Letting the hook react to jobId directly
+  // removes that race.
+  const handlePollingComplete = useCallback((result: JobStatusResponse) => {
+    setPhase('done')
+    setDoneResult(result)
+  }, [])
+
+  const handlePollingError = useCallback((msg: string) => {
+    setPhase('error')
+    setErrorMsg(msg)
+  }, [])
+
+  const pollState = useJobPolling(jobId, {
+    onComplete: handlePollingComplete,
+    onError: handlePollingError,
   })
+
+  // After the API returns a valid jobId, transition the UI to 'polling'.
+  // Doing this in an effect guarantees it happens after the render where
+  // jobId is set, so the hook has already kicked off its first poll.
+  useEffect(() => {
+    if (jobId && phase === 'uploading') {
+      setPhase('polling')
+    }
+  }, [jobId, phase])
 
   const handleFile = useCallback((f: File) => {
     if (!f.type.includes('pdf') && !f.type.includes('image')) {
@@ -307,8 +329,16 @@ export default function UploadPage() {
     if (f) handleFile(f)
   }, [handleFile])
 
-  const handleUpload = async () => {
+  // FIX (Process Invoice): handleSubmit now:
+  //  - guards against re-entry while a request is in flight or polling,
+  //  - properly awaits POST /api/upload,
+  //  - validates that the response contains a usable invoiceId (string,
+  //    non-empty) BEFORE transitioning to the polling state,
+  //  - catches network/parse errors and surfaces them via the error card.
+  const handleSubmit = async () => {
     if (!file) return
+    if (phase === 'uploading' || phase === 'polling') return
+
     setPhase('uploading')
     setErrorMsg(null)
 
@@ -317,29 +347,54 @@ export default function UploadPage() {
       fd.append('file', file)
 
       const res = await fetch('/api/upload', { method: 'POST', body: fd })
-      const body = await res.json()
+      const body = await res.json().catch(() => ({} as any))
 
-      if (!res.ok) throw new Error(body.error || 'Upload failed')
+      if (!res.ok) {
+        throw new Error(body?.error || `Upload failed (${res.status})`)
+      }
 
-      setJobId(body.invoiceId)
-      setPhase('polling')
+      const newJobId: string | undefined = body?.invoiceId
+      if (!newJobId || typeof newJobId !== 'string') {
+        throw new Error('Server response missing invoiceId. Please try again.')
+      }
+
+      // Set jobId FIRST. useJobPolling observes jobId directly and starts
+      // polling on the next render. The useEffect above then flips the
+      // phase to 'polling' so the UI shows the processing timeline.
+      setJobId(newJobId)
     } catch (e: any) {
       setPhase('error')
-      setErrorMsg(e.message || 'Upload failed. Please try again.')
+      setErrorMsg(e?.message || 'Upload failed. Please try again.')
     }
   }
 
+  // FIX (<- Back button): safeExit clears ALL transient state — most
+  // importantly jobId, which causes the polling hook to stop on its next
+  // effect tick — and then navigates to the dashboard. This is responsive
+  // in every phase (idle, uploading, polling, done, error) and never
+  // leaves a hanging promise behind.
+  const safeExit = useCallback(() => {
+    setPhase('idle')
+    setFile(null)
+    setJobId(null)
+    setErrorMsg(null)
+    setDoneResult(null)
+    setDragOver(false)
+    router.push('/dashboard')
+  }, [router])
+
+  // Reset to a fresh upload form (used by inline "Try Again" / "Upload Another")
   const reset = () => {
     setPhase('idle')
     setFile(null)
     setJobId(null)
     setErrorMsg(null)
     setDoneResult(null)
+    setDragOver(false)
   }
 
   const isProcessing = phase === 'uploading' || phase === 'polling'
 
-  // Derive current stage for the timeline
   const currentStage: ProcessingStage =
     phase === 'uploading' ? 'QUEUED' :
     phase === 'polling' && pollState.phase === 'polling' ? pollState.stage :
@@ -347,11 +402,18 @@ export default function UploadPage() {
 
   return (
     <div className="min-h-screen bg-ink">
-      {/* Nav */}
+      {/* Nav — the "<- Back" button now triggers safeExit so the polling
+          hook stops cleanly and the user is sent to the dashboard. It is
+          responsive in every phase, including the error state. */}
       <nav className="border-b border-mist/50 px-6 py-4 flex items-center gap-4">
-        <Link href="/" className="btn-ghost flex items-center gap-2 text-sm">
+        <button
+          type="button"
+          onClick={safeExit}
+          className="btn-ghost flex items-center gap-2 text-sm"
+          aria-label="Back to dashboard"
+        >
           <ArrowLeft className="w-4 h-4" /> Back
-        </Link>
+        </button>
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded-md bg-azure flex items-center justify-center">
             <FileText className="w-3 h-3 text-white" />
@@ -407,10 +469,12 @@ export default function UploadPage() {
               </div>
             )}
 
-            {/* Upload button */}
+            {/* Upload button (Process Invoice) */}
             {file && phase === 'idle' && (
               <button
-                onClick={handleUpload}
+                type="button"
+                onClick={handleSubmit}
+                disabled={isProcessing}
                 className="btn-primary w-full mt-6 py-3 text-base flex items-center justify-center gap-2"
               >
                 <ZapIcon className="w-4 h-4" />
