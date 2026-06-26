@@ -421,6 +421,7 @@ export default function UploadPage() {
           <span className="font-display font-bold text-snow">InvoiceFlow AI</span>
         </div>
       </nav>
+    
 
       <div className="max-w-xl mx-auto px-6 py-16">
         <h1 className="font-display text-4xl font-bold text-snow mb-2">Upload Invoice</h1>
