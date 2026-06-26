@@ -9,7 +9,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { v4 as uuidv4 } from 'uuid'
-import { putInvoice, updateInvoiceStatus } from '@/lib/dynamodb'
+import { putInvoice } from '@/lib/dynamodb'
 
 export const runtime = 'nodejs'
 // Upload itself is fast; we only need a short window for file I/O.
@@ -22,6 +22,41 @@ const VALID_TYPES = [
   'image/webp',
   'image/tiff',
 ]
+
+const UPLOAD_DB_TIMEOUT_MS = 10000
+
+function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(message)), UPLOAD_DB_TIMEOUT_MS)
+    }),
+  ])
+}
+
+/**
+ * Attempt a Supabase upsert, auto-stripping columns that don't exist
+ * in the table schema. This prevents the "Could not find the 'X' column
+ * of 'invoices' in the schema cache" error.
+ */
+async function tryUpsert(invoice: Record<string, any>, retries = 5): Promise<{ error: any }> {
+  if (retries <= 0) {
+    return { error: new Error('Insert failed after stripping all conditional columns') }
+  }
+  const { supabase, TABLES } = await import('@/lib/dynamodb')
+  const { error } = await supabase.from(TABLES.INVOICES).upsert(invoice)
+  if (error && error.message?.includes("Could not find the '") && error.message?.includes("' column of '")) {
+    const match = error.message.match(/'([^']+)' column/)
+    if (match) {
+      const badCol = match[1]
+      const cleaned = { ...invoice }
+      delete cleaned[badCol]
+      console.warn(`[tryUpsert] Stripped unknown column "${badCol}" and retrying`)
+      return tryUpsert(cleaned, retries - 1)
+    }
+  }
+  return { error }
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -45,7 +80,10 @@ export async function POST(req: NextRequest) {
     const buffer = Buffer.from(bytes)
 
     // --- 1. Persist a PROCESSING skeleton immediately ---
-    await putInvoice({
+    // Use tryUpsert which auto-strips columns that don't exist in the
+    // Supabase "invoices" table schema. This handles any schema mismatch
+    // between the Invoice TypeScript type and the actual DB columns.
+    const skeleton: Record<string, any> = {
       id: invoiceId,
       uploadedAt: now,
       fileName: file.name,
@@ -54,15 +92,18 @@ export async function POST(req: NextRequest) {
       invoiceDate: now.split('T')[0],
       dueDate: now.split('T')[0],
       totalAmount: 0,
-      currency: 'USD',
       lineItems: [],
       status: 'PROCESSING',
-      aiConfidence: 0,
-      rawText: '',
-      // processingStage is a UI hint stored alongside the record
-      // so the status endpoint can surface granular progress.
-      // Add this column to your Supabase "invoices" table as text, nullable.
-    } as any)
+    }
+
+    const { error: createError } = await withTimeout(
+      tryUpsert(skeleton),
+      'Invoice queue write timed out. Please try again.'
+    )
+
+    if (createError) {
+      throw createError
+    }
 
     // --- 2. Fire async extraction — intentionally NOT awaited ---
     processInvoiceAsync(invoiceId, file.name, file.type, buffer).catch(err => {
@@ -98,8 +139,10 @@ async function processInvoiceAsync(
     await import('@/lib/dynamodb')
 
   // Helper: update the processing stage label in the DB
-  const setStage = (stage: string) =>
-    updateInvoiceStatus(invoiceId, 'PROCESSING', { notes: stage } as any)
+  const setStage = async (stage: string) => {
+    const { error } = await updateInvoiceStatus(invoiceId, 'PROCESSING', { notes: stage } as any)
+    if (error) throw error
+  }
 
   try {
     // Stage 1 — extract raw text
@@ -136,28 +179,36 @@ async function processInvoiceAsync(
     const existing = await getInvoice(invoiceId)
     if (!existing) return // record deleted mid-flight — nothing to do
 
-    await putInvoice({
+    const update: Record<string, any> = {
       ...existing,
       vendorName: extracted.vendorName,
-      vendorEmail: extracted.vendorEmail,
       invoiceNumber: extracted.invoiceNumber,
       invoiceDate: extracted.invoiceDate,
       dueDate: extracted.dueDate,
       totalAmount: extracted.totalAmount,
-      currency: extracted.currency,
       lineItems: extracted.lineItems,
       status,
-      matchedPOId: po?.id,
-      discrepancies: discrepancies.length > 0 ? discrepancies : undefined,
+      vendorEmail: extracted.vendorEmail,
+      currency: extracted.currency || 'USD',
       aiConfidence: extracted.confidence,
       rawText,
       notes: 'COMPLETE',
-    })
+    }
+    if (po?.id) update.matchedPOId = po.id
+    if (discrepancies.length > 0) update.discrepancies = discrepancies
+
+    // Use tryUpsert to auto-strip columns that don't exist in the schema.
+    const { error: finalizeError } = await tryUpsert(update)
+
+    if (finalizeError) {
+      throw finalizeError
+    }
   } catch (err) {
     console.error('[processInvoiceAsync] error for', invoiceId, err)
     // Mark as PENDING so it surfaces in the dashboard for manual review.
-    await updateInvoiceStatus(invoiceId, 'PENDING', {
+    const { error } = await updateInvoiceStatus(invoiceId, 'PENDING', {
       notes: 'FAILED',
     } as any)
+    if (error) console.error('[processInvoiceAsync] failed to mark invoice as failed', invoiceId, error)
   }
 }

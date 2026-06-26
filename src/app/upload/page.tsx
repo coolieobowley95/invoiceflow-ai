@@ -370,7 +370,7 @@ export default function UploadPage() {
 
   // FIX (<- Back button): safeExit clears ALL transient state — most
   // importantly jobId, which causes the polling hook to stop on its next
-  // effect tick — and then navigates to the dashboard. This is responsive
+  // effect tick — and then navigates to the landing page. This is responsive
   // in every phase (idle, uploading, polling, done, error) and never
   // leaves a hanging promise behind.
   const safeExit = useCallback(() => {
@@ -380,7 +380,7 @@ export default function UploadPage() {
     setErrorMsg(null)
     setDoneResult(null)
     setDragOver(false)
-    router.push('/dashboard')
+    router.push('/')
   }, [router])
 
   // Reset to a fresh upload form (used by inline "Try Again" / "Upload Another")
@@ -403,14 +403,14 @@ export default function UploadPage() {
   return (
     <div className="min-h-screen bg-ink">
       {/* Nav — the "<- Back" button now triggers safeExit so the polling
-          hook stops cleanly and the user is sent to the dashboard. It is
+          hook stops cleanly and the user is sent to the landing page. It is
           responsive in every phase, including the error state. */}
       <nav className="border-b border-mist/50 px-6 py-4 flex items-center gap-4">
         <button
           type="button"
           onClick={safeExit}
           className="btn-ghost flex items-center gap-2 text-sm"
-          aria-label="Back to dashboard"
+          aria-label="Back to home"
         >
           <ArrowLeft className="w-4 h-4" /> Back
         </button>
@@ -422,6 +422,7 @@ export default function UploadPage() {
         </div>
       </nav>
     
+  
 
       <div className="max-w-xl mx-auto px-6 py-16">
         <h1 className="font-display text-4xl font-bold text-snow mb-2">Upload Invoice</h1>

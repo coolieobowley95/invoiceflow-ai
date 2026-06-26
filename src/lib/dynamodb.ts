@@ -113,28 +113,76 @@ export interface PurchaseOrder {
 }
 
 
-// CREATE
-export async function putInvoice(invoice: Invoice) {
+// ---------------------------------------------------------------------------
+// Supabase column name mapper
+// The DB table uses snake_case columns but the TypeScript types use
+// camelCase. This helper converts keys before inserting/updating.
+// ---------------------------------------------------------------------------
+const CAMEL_TO_SNAKE_OVERRIDES: Record<string, string> = {
+  uploadedAt: 'uploaded_at',
+  fileName: 'file_name',
+  vendorName: 'vendor_name',
+  vendorEmail: 'vendor_email',
+  invoiceNumber: 'invoice_number',
+  invoiceDate: 'invoice_date',
+  dueDate: 'due_date',
+  totalAmount: 'total_amount',
+  lineItems: 'line_items',
+  matchedPOId: 'matched_po_id',
+  approvedBy: 'approved_by',
+  approvedAt: 'approved_at',
+  rejectedReason: 'rejected_reason',
+  aiConfidence: 'ai_confidence',
+  rawText: 'raw_text',
+  poNumber: 'po_number',
+  unitPrice: 'unit_price',
+}
 
+function toSnakeCase(key: string): string {
+  return CAMEL_TO_SNAKE_OVERRIDES[key] ?? key.replace(/([A-Z])/g, '_$1').toLowerCase()
+}
+
+function toCamelCase(key: string): string {
+  return key.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
+}
+
+function keysToSnake(obj: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {}
+  for (const [key, value] of Object.entries(obj)) {
+    result[toSnakeCase(key)] = value
+  }
+  return result
+}
+
+function keysToCamel(obj: Record<string, any>): Record<string, any> {
+  const result: Record<string, any> = {}
+  for (const [key, value] of Object.entries(obj)) {
+    result[toCamelCase(key)] = value
+  }
+  return result
+}
+
+
+// CREATE / UPSERT
+export async function putInvoice(invoice: Invoice) {
+  // Convert camelCase keys to snake_case for Supabase
+  const dbRecord = keysToSnake(invoice as any)
   return await supabase
     .from(TABLES.INVOICES)
-    .upsert(invoice)
-
+    .upsert(dbRecord)
 }
 
 
 // GET
 export async function getInvoice(id: string) {
-
   const { data } = await supabase
     .from(TABLES.INVOICES)
     .select("*")
     .eq("id", id)
     .single()
 
-
-  return data as Invoice | null
-
+  // Convert snake_case keys back to camelCase
+  return (data ? keysToCamel(data) : null) as Invoice | null
 }
 
 
@@ -144,15 +192,14 @@ export async function updateInvoiceStatus(
   status: InvoiceStatus,
   extra?: Partial<Invoice>
 ){
-
+  const dbExtra = extra ? keysToSnake(extra as any) : {}
   return await supabase
     .from(TABLES.INVOICES)
     .update({
       status,
-      ...extra
+      ...dbExtra
     })
     .eq("id", id)
-
 }
 
 
@@ -160,30 +207,24 @@ export async function updateInvoiceStatus(
 export async function listInvoices(
   status?: InvoiceStatus
 ){
-
   let query = supabase
     .from(TABLES.INVOICES)
     .select("*")
-    .order("uploadedAt", {
+    .order("uploaded_at", {
       ascending:false
     })
 
-
   if(status){
-
     query = query.eq(
       "status",
       status
     )
-
   }
-
 
   const { data } = await query
 
-
-  return (data || []) as Invoice[]
-
+  // Convert snake_case keys back to camelCase
+  return ((data || []) as Record<string, any>[]).map(keysToCamel) as Invoice[]
 }
 
 
@@ -197,7 +238,7 @@ export async function listPurchaseOrders(){
     .select("*")
 
 
-  return (data || []) as PurchaseOrder[]
+  return ((data || []) as Record<string, any>[]).map(keysToCamel) as PurchaseOrder[]
 
 }
 
@@ -212,6 +253,6 @@ export async function getPurchaseOrder(id:string){
     .single()
 
 
-  return data as PurchaseOrder | null
+  return (data ? keysToCamel(data) : null) as PurchaseOrder | null
 
 }
