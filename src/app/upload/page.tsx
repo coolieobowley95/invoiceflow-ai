@@ -1,33 +1,303 @@
 'use client'
 
+/**
+ * Upload page — async/polling architecture.
+ *
+ * Flow:
+ *  1. User drops/selects a file → handleUpload()
+ *  2. POST /api/upload → returns { invoiceId } in ~300 ms (202 Accepted)
+ *  3. useJobPolling(invoiceId) begins polling GET /api/status/:id
+ *  4. UI transitions through stages as the backend updates the DB
+ *  5. Terminal state → success card or soft error with dashboard CTA
+ */
 import { useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Upload, FileText, ArrowLeft, CheckCircle, Loader2, AlertCircle, X } from 'lucide-react'
+import { Upload, FileText, ArrowLeft, CheckCircle, AlertCircle, X, LayoutDashboard } from 'lucide-react'
+import { useJobPolling, type ProcessingStage, type JobStatusResponse } from '@/hooks/useJobPolling'
 
-type UploadState = 'idle' | 'uploading' | 'processing' | 'done' | 'error'
+// ---------------------------------------------------------------------------
+// Stage metadata — order, labels, and descriptions shown in the UI timeline
+// ---------------------------------------------------------------------------
+const STAGES: { key: ProcessingStage; label: string; desc: string }[] = [
+  { key: 'QUEUED',          label: 'File received',      desc: 'Securely uploaded to processing queue' },
+  { key: 'EXTRACTING_TEXT', label: 'Extracting text',    desc: 'Reading document structure & content' },
+  { key: 'PARSING_FIELDS',  label: 'AI parsing fields',  desc: 'Identifying vendor, amounts, line items' },
+  { key: 'MATCHING_PO',     label: 'Matching to PO',     desc: 'Searching purchase order database' },
+  { key: 'COMPLETE',        label: 'Complete',            desc: 'Invoice processed and ready for review' },
+]
+
+const STAGE_ORDER: ProcessingStage[] = STAGES.map(s => s.key)
+
+function stageIndex(stage: ProcessingStage) {
+  return STAGE_ORDER.indexOf(stage)
+}
+
+const STATUS_COPY: Record<string, { label: string; color: string }> = {
+  MATCHED:     { label: 'Matched to a PO — ready for approval', color: 'text-sage' },
+  DISCREPANCY: { label: 'Discrepancies found — needs review',   color: 'text-amber' },
+  PENDING:     { label: 'Logged — awaiting manual assignment',  color: 'text-ghost' },
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+function DropZone({
+  file,
+  dragOver,
+  disabled,
+  onDrop,
+  onDragOver,
+  onDragLeave,
+  onClick,
+  onRemove,
+}: {
+  file: File | null
+  dragOver: boolean
+  disabled: boolean
+  onDrop: (e: React.DragEvent) => void
+  onDragOver: () => void
+  onDragLeave: () => void
+  onClick: () => void
+  onRemove: () => void
+}) {
+  return (
+    <div
+      onDrop={onDrop}
+      onDragOver={e => { e.preventDefault(); onDragOver() }}
+      onDragLeave={onDragLeave}
+      onClick={!disabled ? onClick : undefined}
+      className={`
+        relative border-2 border-dashed rounded-2xl p-10 text-center transition-all duration-200
+        ${!disabled ? 'cursor-pointer' : 'cursor-default'}
+        ${dragOver ? 'border-azure bg-azure/5 scale-[1.01]' : 'border-mist'}
+        ${file && !disabled ? 'border-sage/40 bg-sage/5' : ''}
+        ${!file && !disabled ? 'hover:border-azure/50 hover:bg-mist/20' : ''}
+      `}
+    >
+      {file ? (
+        <div className="space-y-3">
+          <FileText className="w-12 h-12 text-sage mx-auto" />
+          <div>
+            <p className="font-semibold text-snow">{file.name}</p>
+            <p className="text-ghost text-sm">{(file.size / 1024).toFixed(1)} KB</p>
+          </div>
+          {!disabled && (
+            <button
+              onClick={e => { e.stopPropagation(); onRemove() }}
+              className="text-ghost hover:text-rose transition-colors mt-1"
+              aria-label="Remove file"
+            >
+              <X className="w-4 h-4 mx-auto" />
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <Upload className="w-12 h-12 text-ghost mx-auto" />
+          <div>
+            <p className="text-snow font-semibold">Drop your invoice here</p>
+            <p className="text-ghost text-sm mt-1">or click to browse — PDF or image, max 10 MB</p>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ProcessingTimeline({ currentStage }: { currentStage: ProcessingStage }) {
+  const current = stageIndex(currentStage)
+
+  return (
+    <div className="mt-6 space-y-3">
+      {STAGES.map((stage, i) => {
+        const isDone    = i < current
+        const isActive  = i === current
+        const isPending = i > current
+
+        return (
+          <div
+            key={stage.key}
+            className={`
+              flex items-start gap-3 p-3 rounded-lg transition-all duration-500
+              ${isActive  ? 'bg-azure/10 border border-azure/20' : ''}
+              ${isDone    ? 'opacity-60' : ''}
+              ${isPending ? 'opacity-30' : ''}
+            `}
+          >
+            {/* Status indicator */}
+            <div className="flex-shrink-0 mt-0.5">
+              {isDone ? (
+                <CheckCircle className="w-4 h-4 text-sage" />
+              ) : isActive ? (
+                <SpinnerIcon className="w-4 h-4 text-azure animate-spin" />
+              ) : (
+                <div className="w-4 h-4 rounded-full border border-ghost/30" />
+              )}
+            </div>
+
+            {/* Label + description */}
+            <div>
+              <p className={`text-sm font-semibold ${isActive ? 'text-snow' : 'text-ghost'}`}>
+                {stage.label}
+              </p>
+              {isActive && (
+                <p className="text-xs text-ghost mt-0.5">{stage.desc}</p>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function SuccessCard({
+  result,
+  onUploadAnother,
+}: {
+  result: JobStatusResponse
+  onUploadAnother: () => void
+}) {
+  const router = useRouter()
+  const copy = STATUS_COPY[result.status] ?? { label: result.status, color: 'text-ghost' }
+
+  return (
+    <div className="card border-sage/30 animate-fade-in">
+      <div className="flex items-center gap-3 mb-5">
+        <CheckCircle className="w-8 h-8 text-sage flex-shrink-0" />
+        <div>
+          <h2 className="font-display font-bold text-xl text-snow">Processed!</h2>
+          <p className="text-ghost text-sm">
+            {result.invoiceNumber && result.invoiceNumber !== 'Processing…'
+              ? `Invoice ${result.invoiceNumber}`
+              : result.vendorName ?? ''}
+          </p>
+        </div>
+      </div>
+
+      {/* Outcome badge */}
+      <div className="bg-mist rounded-lg p-4 mb-4">
+        <p className={`text-sm font-medium ${copy.color}`}>{copy.label}</p>
+      </div>
+
+      {/* Key fields */}
+      {result.totalAmount != null && result.totalAmount > 0 && (
+        <div className="grid grid-cols-2 gap-3 mb-5">
+          <Stat label="Amount" value={`${result.currency ?? 'USD'} ${result.totalAmount.toLocaleString()}`} />
+          <Stat label="AI confidence" value={`${Math.round((result.aiConfidence ?? 0) * 100)}%`} />
+        </div>
+      )}
+
+      <div className="flex gap-3">
+        <button
+          onClick={() => router.push(`/dashboard?highlight=${result.jobId}`)}
+          className="btn-primary flex-1 flex items-center justify-center gap-2"
+        >
+          <LayoutDashboard className="w-4 h-4" />
+          View in Dashboard
+        </button>
+        <button onClick={onUploadAnother} className="btn-secondary flex-1">
+          Upload Another
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-slate rounded-lg p-3">
+      <p className="text-xs text-ghost mb-1">{label}</p>
+      <p className="text-sm font-semibold text-snow">{value}</p>
+    </div>
+  )
+}
+
+function ErrorCard({
+  message,
+  onRetry,
+}: {
+  message: string
+  onRetry: () => void
+}) {
+  const router = useRouter()
+  const isTimeout = message.toLowerCase().includes('dashboard')
+
+  return (
+    <div className="card border-rose/20 bg-rose/5 animate-fade-in">
+      <div className="flex items-start gap-3 mb-4">
+        <AlertCircle className="w-5 h-5 text-rose flex-shrink-0 mt-0.5" />
+        <p className="text-rose text-sm">{message}</p>
+      </div>
+      <div className="flex gap-3">
+        {isTimeout ? (
+          <button
+            onClick={() => router.push('/dashboard')}
+            className="btn-secondary flex-1 flex items-center justify-center gap-2"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            Check Dashboard
+          </button>
+        ) : (
+          <button onClick={onRetry} className="btn-primary flex-1">
+            Try Again
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Inline spinner SVG (avoids lucide-react dependency on a missing icon)
+function SpinnerIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+    </svg>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+type UploadPhase = 'idle' | 'uploading' | 'polling' | 'done' | 'error'
 
 export default function UploadPage() {
-  const router = useRouter()
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [state, setState] = useState<UploadState>('idle')
-  const [file, setFile] = useState<File | null>(null)
+  const fileInputRef  = useRef<HTMLInputElement>(null)
+  const [file, setFile]       = useState<File | null>(null)
   const [dragOver, setDragOver] = useState(false)
-  const [result, setResult] = useState<{ id: string; invoiceNumber: string; status: string } | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [progress, setProgress] = useState(0)
+  const [phase, setPhase]     = useState<UploadPhase>('idle')
+  const [jobId, setJobId]     = useState<string | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [doneResult, setDoneResult] = useState<JobStatusResponse | null>(null)
+
+  // Polling is active only when we have a jobId and phase === 'polling'
+  const pollState = useJobPolling(phase === 'polling' ? jobId : null, {
+    onComplete: result => {
+      setPhase('done')
+      setDoneResult(result)
+    },
+    onError: msg => {
+      setPhase('error')
+      setErrorMsg(msg)
+    },
+  })
 
   const handleFile = useCallback((f: File) => {
     if (!f.type.includes('pdf') && !f.type.includes('image')) {
-      setError('Please upload a PDF or image file.')
+      setErrorMsg('Please upload a PDF or image file.')
+      setPhase('error')
       return
     }
     if (f.size > 10 * 1024 * 1024) {
-      setError('File must be under 10MB.')
+      setErrorMsg('File must be under 10 MB.')
+      setPhase('error')
       return
     }
     setFile(f)
-    setError(null)
+    setPhase('idle')
+    setErrorMsg(null)
   }, [])
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -37,84 +307,47 @@ export default function UploadPage() {
     if (f) handleFile(f)
   }, [handleFile])
 
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]
-    if (f) handleFile(f)
-  }
-
   const handleUpload = async () => {
     if (!file) return
-    setState('uploading')
-    setProgress(0)
-    setError(null)
+    setPhase('uploading')
+    setErrorMsg(null)
 
     try {
-      const formData = new FormData()
-      formData.append('file', file)
+      const fd = new FormData()
+      fd.append('file', file)
 
-      // Simulate progress during upload
-      const progressInterval = setInterval(() => {
-        setProgress(p => Math.min(p + 10, 60))
-      }, 200)
+      const res = await fetch('/api/upload', { method: 'POST', body: fd })
+      const body = await res.json()
 
-      const uploadRes = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      })
+      if (!res.ok) throw new Error(body.error || 'Upload failed')
 
-      clearInterval(progressInterval)
-
-      if (!uploadRes.ok) {
-        const err = await uploadRes.json()
-        throw new Error(err.error || 'Upload failed')
-      }
-
-      const { invoiceId } = await uploadRes.json()
-      setState('processing')
-      setProgress(65)
-
-      // Poll for processing completion
-      let attempts = 0
-      while (attempts < 30) {
-        await new Promise(r => setTimeout(r, 1000))
-        setProgress(p => Math.min(p + 2, 95))
-
-        const statusRes = await fetch(`/api/invoices/${invoiceId}`)
-        if (statusRes.ok) {
-          const invoice = await statusRes.json()
-          if (invoice.status !== 'PROCESSING' && invoice.status !== 'PENDING') {
-            setProgress(100)
-            setState('done')
-            setResult({ id: invoiceId, invoiceNumber: invoice.invoiceNumber, status: invoice.status })
-            return
-          }
-        }
-        attempts++
-      }
-
-      throw new Error('Processing timed out. Please check the dashboard.')
+      setJobId(body.invoiceId)
+      setPhase('polling')
     } catch (e: any) {
-      setState('error')
-      setError(e.message || 'Something went wrong.')
+      setPhase('error')
+      setErrorMsg(e.message || 'Upload failed. Please try again.')
     }
   }
 
   const reset = () => {
-    setState('idle')
+    setPhase('idle')
     setFile(null)
-    setResult(null)
-    setError(null)
-    setProgress(0)
+    setJobId(null)
+    setErrorMsg(null)
+    setDoneResult(null)
   }
 
-  const statusLabel: Record<string, string> = {
-    MATCHED: 'Auto-matched to a PO — ready for approval',
-    DISCREPANCY: 'Discrepancies found — needs review',
-    PENDING: 'Queued for processing',
-  }
+  const isProcessing = phase === 'uploading' || phase === 'polling'
+
+  // Derive current stage for the timeline
+  const currentStage: ProcessingStage =
+    phase === 'uploading' ? 'QUEUED' :
+    phase === 'polling' && pollState.phase === 'polling' ? pollState.stage :
+    'QUEUED'
 
   return (
     <div className="min-h-screen bg-ink">
+      {/* Nav */}
       <nav className="border-b border-mist/50 px-6 py-4 flex items-center gap-4">
         <Link href="/" className="btn-ghost flex items-center gap-2 text-sm">
           <ArrowLeft className="w-4 h-4" /> Back
@@ -127,155 +360,87 @@ export default function UploadPage() {
         </div>
       </nav>
 
-      <div className="max-w-2xl mx-auto px-6 py-16">
+      <div className="max-w-xl mx-auto px-6 py-16">
         <h1 className="font-display text-4xl font-bold text-snow mb-2">Upload Invoice</h1>
         <p className="text-ghost mb-10">PDF or image. Our AI handles the rest.</p>
 
-        {state === 'done' && result ? (
-          <div className="card border-sage/30 animate-fade-in">
-            <div className="flex items-center gap-3 mb-4">
-              <CheckCircle className="w-8 h-8 text-sage" />
-              <div>
-                <h2 className="font-display font-bold text-xl text-snow">Processed!</h2>
-                <p className="text-ghost text-sm">Invoice {result.invoiceNumber}</p>
-              </div>
-            </div>
-            <div className="bg-mist rounded-lg p-4 mb-6">
-              <p className="text-sm text-snow">
-                {statusLabel[result.status] || `Status: ${result.status}`}
-              </p>
-            </div>
-            <div className="flex gap-3">
-              <button
-                onClick={() => router.push(`/dashboard?highlight=${result.id}`)}
-                className="btn-primary flex-1"
-              >
-                View in Dashboard
-              </button>
-              <button onClick={reset} className="btn-secondary flex-1">
-                Upload Another
-              </button>
-            </div>
-          </div>
-        ) : (
+        {/* Terminal states */}
+        {phase === 'done' && doneResult && (
+          <SuccessCard result={doneResult} onUploadAnother={reset} />
+        )}
+
+        {phase === 'error' && errorMsg && !doneResult && (
+          <ErrorCard message={errorMsg} onRetry={reset} />
+        )}
+
+        {/* Upload + polling flow */}
+        {phase !== 'done' && (
           <>
-            {/* Drop zone */}
-            <div
+            <DropZone
+              file={file}
+              dragOver={dragOver}
+              disabled={isProcessing}
               onDrop={onDrop}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+              onDragOver={() => setDragOver(true)}
               onDragLeave={() => setDragOver(false)}
-              onClick={() => state === 'idle' && fileInputRef.current?.click()}
-              className={`
-                relative border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-200 cursor-pointer
-                ${dragOver ? 'border-azure bg-azure/5 scale-[1.01]' : 'border-mist hover:border-azure/50 hover:bg-mist/30'}
-                ${file ? 'border-sage/40 bg-sage/5' : ''}
-                ${state !== 'idle' ? 'pointer-events-none' : ''}
-              `}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,image/*"
-                className="hidden"
-                onChange={onFileChange}
-              />
+              onClick={() => fileInputRef.current?.click()}
+              onRemove={reset}
+            />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,image/*"
+              className="hidden"
+              onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }}
+            />
 
-              {file ? (
-                <div className="space-y-3">
-                  <FileText className="w-12 h-12 text-sage mx-auto" />
-                  <div>
-                    <p className="font-semibold text-snow">{file.name}</p>
-                    <p className="text-ghost text-sm">{(file.size / 1024).toFixed(1)} KB</p>
-                  </div>
-                  {state === 'idle' && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); reset() }}
-                      className="text-ghost hover:text-rose transition-colors"
-                    >
-                      <X className="w-4 h-4 mx-auto" />
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <Upload className="w-12 h-12 text-ghost mx-auto" />
-                  <div>
-                    <p className="text-snow font-semibold">Drop your invoice here</p>
-                    <p className="text-ghost text-sm mt-1">or click to browse — PDF or image, max 10MB</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Progress bar */}
-            {(state === 'uploading' || state === 'processing') && (
-              <div className="mt-6 animate-fade-in">
-                <div className="flex justify-between text-sm mb-2">
-                  <span className="text-ghost flex items-center gap-2">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    {state === 'uploading' ? 'Uploading...' : 'AI extracting data...'}
-                  </span>
-                  <span className="text-azure font-mono">{progress}%</span>
-                </div>
-                <div className="h-1.5 bg-mist rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-azure to-cyan rounded-full transition-all duration-300"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-                <div className="mt-3 space-y-1">
-                  {['File received', 'Extracting text', 'AI parsing fields', 'Matching to POs'].map((step, i) => (
-                    <div key={step} className={`text-xs flex items-center gap-2 transition-colors ${
-                      progress > i * 25 ? 'text-sage' : 'text-ghost/30'
-                    }`}>
-                      <CheckCircle className="w-3 h-3" />
-                      {step}
-                    </div>
-                  ))}
-                </div>
-              </div>
+            {/* Processing timeline */}
+            {isProcessing && (
+              <ProcessingTimeline currentStage={currentStage} />
             )}
 
-            {/* Error */}
-            {error && (
-              <div className="mt-4 flex items-start gap-3 bg-rose/10 border border-rose/20 rounded-lg p-4 animate-fade-in">
+            {/* Error inline (validation errors, not terminal) */}
+            {phase === 'error' && errorMsg && (
+              <div className="mt-4 flex items-start gap-3 bg-rose/10 border border-rose/20 rounded-lg p-4">
                 <AlertCircle className="w-5 h-5 text-rose flex-shrink-0 mt-0.5" />
-                <p className="text-rose text-sm">{error}</p>
+                <p className="text-rose text-sm">{errorMsg}</p>
               </div>
             )}
 
             {/* Upload button */}
-            {file && state === 'idle' && (
+            {file && phase === 'idle' && (
               <button
                 onClick={handleUpload}
                 className="btn-primary w-full mt-6 py-3 text-base flex items-center justify-center gap-2"
               >
-                <Zap className="w-4 h-4" />
+                <ZapIcon className="w-4 h-4" />
                 Process Invoice
               </button>
             )}
           </>
         )}
 
-        {/* Info cards */}
-        <div className="grid grid-cols-3 gap-4 mt-10">
-          {[
-            { label: 'Auto-extraction', desc: 'Vendor, amounts, line items' },
-            { label: 'PO matching', desc: 'Automatic + discrepancy flags' },
-            { label: 'Audit trail', desc: 'Every action logged in DynamoDB' },
-          ].map(({ label, desc }) => (
-            <div key={label} className="bg-slate rounded-lg p-3 text-center">
-              <p className="text-xs font-semibold text-azure mb-1">{label}</p>
-              <p className="text-xs text-ghost">{desc}</p>
-            </div>
-          ))}
-        </div>
+        {/* Feature pills */}
+        {(phase === 'idle' || phase === 'error') && (
+          <div className="grid grid-cols-3 gap-4 mt-10">
+            {[
+              { label: 'Auto-extraction',  desc: 'Vendor, amounts, line items' },
+              { label: 'PO matching',      desc: 'Auto + discrepancy flags' },
+              { label: 'Audit trail',      desc: 'Every action in DynamoDB' },
+            ].map(({ label, desc }) => (
+              <div key={label} className="bg-slate rounded-lg p-3 text-center">
+                <p className="text-xs font-semibold text-azure mb-1">{label}</p>
+                <p className="text-xs text-ghost">{desc}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-function Zap({ className }: { className?: string }) {
+function ZapIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />

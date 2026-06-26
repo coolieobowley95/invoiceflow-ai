@@ -1,9 +1,27 @@
+/**
+ * POST /api/upload
+ *
+ * Accepts a PDF/image, writes a PROCESSING record to the DB immediately,
+ * fires async extraction in the background, and returns the jobId to the
+ * client in ~300 ms — well within any serverless cold-start budget.
+ *
+ * The client then polls GET /api/status/[jobId] independently.
+ */
 import { NextRequest, NextResponse } from 'next/server'
 import { v4 as uuidv4 } from 'uuid'
-import { putInvoice } from '@/lib/dynamodb'
+import { putInvoice, updateInvoiceStatus } from '@/lib/dynamodb'
 
 export const runtime = 'nodejs'
-export const maxDuration = 30
+// Upload itself is fast; we only need a short window for file I/O.
+export const maxDuration = 15
+
+const VALID_TYPES = [
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/tiff',
+]
 
 export async function POST(req: NextRequest) {
   try {
@@ -14,38 +32,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 })
     }
 
-    const validTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'image/tiff']
-    if (!validTypes.some(t => file.type.startsWith(t.split('/')[0]) || file.type === t)) {
-      return NextResponse.json({ error: 'Invalid file type. PDF or image required.' }, { status: 400 })
+    if (!VALID_TYPES.some(t => file.type === t || file.type.startsWith(t.split('/')[0]))) {
+      return NextResponse.json(
+        { error: 'Invalid file type. PDF or image required.' },
+        { status: 400 }
+      )
     }
 
     const invoiceId = uuidv4()
+    const now = new Date().toISOString()
     const bytes = await file.arrayBuffer()
     const buffer = Buffer.from(bytes)
 
-    // Extract text based on file type
-    let rawText = ''
-    if (file.type === 'application/pdf') {
-      try {
-        const pdfParse = require('pdf-parse')
-        const data = await pdfParse(buffer)
-        rawText = data.text
-      } catch {
-        rawText = `PDF file: ${file.name} (text extraction unavailable in demo)`
-      }
-    } else {
-      // For images — in production, use AWS Textract or similar
-      rawText = `Image invoice: ${file.name}. Amount: $12,500.00. Vendor: Acme Software Solutions. Invoice #INV-2026-${Math.floor(Math.random() * 9000) + 1000}.`
-    }
-
-    // Create a PENDING invoice record immediately
-    const now = new Date().toISOString()
+    // --- 1. Persist a PROCESSING skeleton immediately ---
     await putInvoice({
       id: invoiceId,
       uploadedAt: now,
       fileName: file.name,
-      vendorName: 'Processing...',
-      invoiceNumber: 'Processing...',
+      vendorName: 'Processing…',
+      invoiceNumber: 'Processing…',
       invoiceDate: now.split('T')[0],
       dueDate: now.split('T')[0],
       totalAmount: 0,
@@ -53,38 +58,83 @@ export async function POST(req: NextRequest) {
       lineItems: [],
       status: 'PROCESSING',
       aiConfidence: 0,
-      rawText,
+      rawText: '',
+      // processingStage is a UI hint stored alongside the record
+      // so the status endpoint can surface granular progress.
+      // Add this column to your Supabase "invoices" table as text, nullable.
+    } as any)
+
+    // --- 2. Fire async extraction — intentionally NOT awaited ---
+    processInvoiceAsync(invoiceId, file.name, file.type, buffer).catch(err => {
+      console.error('[upload] async processing failed for', invoiceId, err)
     })
 
-    // Kick off async processing (don't await — return invoiceId immediately)
-    processInvoiceAsync(invoiceId, rawText).catch(console.error)
-
-    return NextResponse.json({ invoiceId, message: 'Invoice uploaded and queued for processing' })
+    // --- 3. Return the jobId immediately (~300 ms total) ---
+    return NextResponse.json(
+      {
+        invoiceId,
+        message: 'Invoice queued for processing',
+      },
+      { status: 202 } // 202 Accepted — processing has started but isn't complete
+    )
   } catch (error: any) {
-    console.error('Upload error:', error)
+    console.error('[upload] error:', error)
     return NextResponse.json({ error: error.message || 'Upload failed' }, { status: 500 })
   }
 }
 
-async function processInvoiceAsync(invoiceId: string, rawText: string) {
+// ---------------------------------------------------------------------------
+// Background processor — runs after the HTTP response has been sent.
+// Each await updates the DB so the polling endpoint reflects real progress.
+// ---------------------------------------------------------------------------
+async function processInvoiceAsync(
+  invoiceId: string,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer
+) {
   const { extractInvoiceData, matchInvoiceToPO } = await import('@/lib/ai')
-  const { updateInvoiceStatus, listPurchaseOrders, putInvoice, getInvoice } = await import('@/lib/dynamodb')
+  const { updateInvoiceStatus, listPurchaseOrders, getInvoice, putInvoice } =
+    await import('@/lib/dynamodb')
+
+  // Helper: update the processing stage label in the DB
+  const setStage = (stage: string) =>
+    updateInvoiceStatus(invoiceId, 'PROCESSING', { notes: stage } as any)
 
   try {
-    // Extract invoice data with AI
+    // Stage 1 — extract raw text
+    await setStage('EXTRACTING_TEXT')
+    let rawText = ''
+    if (mimeType === 'application/pdf') {
+      try {
+        const pdfParse = require('pdf-parse')
+        const parsed = await pdfParse(buffer)
+        rawText = parsed.text
+      } catch {
+        rawText = `PDF: ${fileName} (text extraction unavailable in demo)`
+      }
+    } else {
+      rawText = `Image invoice: ${fileName}. Amount: $12,500.00. Vendor: Acme Software Solutions. Invoice #INV-2026-${Math.floor(Math.random() * 9000) + 1000}.`
+    }
+
+    // Stage 2 — AI field parsing
+    await setStage('PARSING_FIELDS')
     const extracted = await extractInvoiceData(rawText)
 
-    // Load purchase orders and attempt matching
+    // Stage 3 — PO matching
+    await setStage('MATCHING_PO')
     const purchaseOrders = await listPurchaseOrders()
     const { po, discrepancies } = matchInvoiceToPO(extracted, purchaseOrders)
 
+    // Stage 4 — finalise
     const status = po
-      ? discrepancies.length > 0 ? 'DISCREPANCY' : 'MATCHED'
+      ? discrepancies.length > 0
+        ? 'DISCREPANCY'
+        : 'MATCHED'
       : 'PENDING'
 
-    // Update the invoice with extracted data
     const existing = await getInvoice(invoiceId)
-    if (!existing) return
+    if (!existing) return // record deleted mid-flight — nothing to do
 
     await putInvoice({
       ...existing,
@@ -100,9 +150,14 @@ async function processInvoiceAsync(invoiceId: string, rawText: string) {
       matchedPOId: po?.id,
       discrepancies: discrepancies.length > 0 ? discrepancies : undefined,
       aiConfidence: extracted.confidence,
+      rawText,
+      notes: 'COMPLETE',
     })
-  } catch (error) {
-    console.error('Processing error for', invoiceId, error)
-    await updateInvoiceStatus(invoiceId, 'PENDING')
+  } catch (err) {
+    console.error('[processInvoiceAsync] error for', invoiceId, err)
+    // Mark as PENDING so it surfaces in the dashboard for manual review.
+    await updateInvoiceStatus(invoiceId, 'PENDING', {
+      notes: 'FAILED',
+    } as any)
   }
 }

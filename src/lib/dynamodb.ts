@@ -118,7 +118,7 @@ export async function putInvoice(invoice: Invoice) {
 
   return await supabase
     .from(TABLES.INVOICES)
-    .insert(invoice)
+    .upsert(invoice)
 
 }
 
