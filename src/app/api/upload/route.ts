@@ -60,14 +60,17 @@ export async function POST(req: NextRequest) {
     // 2. Extract text
     let rawText = ''
     if (file.type === 'application/pdf') {
-      try {
-        const pdfParse = require('pdf-parse')
-        const parsed = await pdfParse(buffer)
-        rawText = parsed.text?.slice(0, 3000) || ''
-      } catch {
-        rawText = `PDF: ${file.name}`
-      }
-    } else {
+  try {
+    const pdfParse = require('pdf-parse')
+    const parsed = await pdfParse(buffer)
+    rawText = parsed.text?.slice(0, 3000) || ''
+    console.log('[upload] extracted text length:', rawText.length)
+    console.log('[upload] extracted text preview:', rawText.slice(0, 200))
+  } catch (err) {
+    console.error('[upload] pdf-parse failed:', err)
+    rawText = `PDF: ${file.name}`
+  }
+} else {
       rawText = `Image invoice: ${file.name}. Amount: $12,500.00. Vendor: Acme Software Solutions. Invoice #INV-2026-${Math.floor(Math.random() * 9000) + 1000}.`
     }
 
