@@ -1,3 +1,5 @@
+
+
 import Groq from 'groq-sdk'
 import type { Invoice, LineItem, PurchaseOrder, Discrepancy } from './dynamodb'
 
@@ -16,78 +18,35 @@ export interface ExtractionResult {
 }
 
 export async function extractInvoiceData(rawText: string): Promise<ExtractionResult> {
-  const today = new Date().toISOString().split('T')[0]
-  const in30Days = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-
-  const prompt = `You are an expert invoice data extraction AI. Your job is to find invoice information from any text, even if it is messy, partial, or poorly formatted.
-
-INSTRUCTIONS:
-- Read the text carefully and extract every piece of invoice data you can find
-- Look for: company names, vendor names, supplier names, bill from, service provider
-- Look for: invoice numbers, reference numbers, invoice ID, bill number
-- Look for: dates in any format (Jan 25 2026, 01/25/2026, 2026-01-25, etc)
-- Look for: dollar amounts, totals, subtotals, amount due, balance due
-- Look for: line items, services, products, descriptions with prices
-- Look for: email addresses near company names
-- Even if the text is short or unclear, extract whatever you can find
-- Set confidence between 0.0 and 1.0 based on how much data you found
-
-Return ONLY a valid JSON object. No explanation, no markdown, no code blocks. Just raw JSON:
+  const prompt = `Extract invoice data and return ONLY valid JSON:
 {
-  "vendorName": "the company or person sending the invoice, or Unknown Vendor if not found",
-  "vendorEmail": "email address or null",
-  "invoiceNumber": "invoice number or reference number found, or INV-${Date.now()} if not found",
-  "invoiceDate": "date in YYYY-MM-DD format or ${today} if not found",
-  "dueDate": "due date in YYYY-MM-DD format or ${in30Days} if not found",
-  "totalAmount": 0,
+  "vendorName": "string",
+  "vendorEmail": "string or null",
+  "invoiceNumber": "string",
+  "invoiceDate": "YYYY-MM-DD",
+  "dueDate": "YYYY-MM-DD",
+  "totalAmount": number,
   "currency": "USD",
-  "lineItems": [
-    {
-      "description": "item or service description",
-      "quantity": 1,
-      "unitPrice": 0,
-      "total": 0
-    }
-  ],
-  "confidence": 0.5
+  "lineItems": [{"description": "string", "quantity": number, "unitPrice": number, "total": number}],
+  "confidence": 0.0 to 1.0
 }
 
-INVOICE TEXT TO EXTRACT FROM:
----
-${rawText.slice(0, 4000)}
----
-
-Remember: return ONLY the JSON object, nothing else.`
+Invoice:
+${rawText.slice(0, 3000)}`
 
   const response = await groq.chat.completions.create({
     model: 'llama-3.1-8b-instant',
-    messages: [
-      {
-        role: 'system',
-        content: 'You are an invoice extraction AI. You always respond with valid JSON only. Never include markdown, code blocks, or explanations. Only output the raw JSON object.'
-      },
-      {
-        role: 'user',
-        content: prompt
-      }
-    ],
+    messages: [{ role: 'user', content: prompt }],
     temperature: 0.1,
-    max_tokens: 1500,
+    max_tokens: 1000,
   })
 
   let parsed: any = {}
   try {
     const content = response.choices[0].message.content || '{}'
-    // Strip any accidental markdown code blocks
-    const cleaned = content
-      .replace(/```json/gi, '')
-      .replace(/```/g, '')
-      .trim()
-    // Find the JSON object
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/)
+    const jsonMatch = content.match(/\{[\s\S]*\}/)
     parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {}
-  } catch (err) {
-    console.error('[ai] JSON parse error:', err)
+  } catch {
     parsed = {}
   }
 
@@ -95,12 +54,12 @@ Remember: return ONLY the JSON object, nothing else.`
     vendorName: parsed.vendorName || 'Unknown Vendor',
     vendorEmail: parsed.vendorEmail || undefined,
     invoiceNumber: parsed.invoiceNumber || `INV-${Date.now()}`,
-    invoiceDate: parsed.invoiceDate || today,
-    dueDate: parsed.dueDate || in30Days,
+    invoiceDate: parsed.invoiceDate || new Date().toISOString().split('T')[0],
+    dueDate: parsed.dueDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
     totalAmount: typeof parsed.totalAmount === 'number' ? parsed.totalAmount : 0,
     currency: parsed.currency || 'USD',
     lineItems: Array.isArray(parsed.lineItems) ? parsed.lineItems : [],
-    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.3,
+    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
   }
 }
 
