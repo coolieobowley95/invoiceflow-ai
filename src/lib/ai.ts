@@ -33,7 +33,7 @@ Invoice:
 ${rawText.slice(0, 3000)}`
 
   const response = await groq.chat.completions.create({
-    model: 'llama3-8b-8192',
+    model: 'llama-3.1-8b-instant',
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.1,
     max_tokens: 1000,
@@ -117,7 +117,7 @@ Discrepancies: ${invoice.discrepancies?.length || 0}
 AI Confidence: ${Math.round(invoice.aiConfidence * 100)}%`
 
   const response = await groq.chat.completions.create({
-    model: 'llama3-8b-8192',
+    model: 'llama-3.1-8b-instant',
     messages: [{ role: 'user', content: prompt }],
     max_tokens: 150,
     temperature: 0.3,
