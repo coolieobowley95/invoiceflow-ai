@@ -1,3 +1,4 @@
+
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
@@ -5,8 +6,8 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import {
   FileText, Upload, CheckCircle, AlertTriangle, Clock,
-  TrendingUp, X, RefreshCw, DollarSign,
-  Zap, Shield, Eye, Info
+  TrendingUp, X, ChevronRight, RefreshCw, DollarSign,
+  Zap, Shield, Eye
 } from 'lucide-react'
 import type { Invoice } from '@/lib/dynamodb'
 
@@ -49,6 +50,7 @@ export default function Dashboard() {
       setInvoices(Array.isArray(invData) ? invData : [])
       setStats(statsData)
 
+      // Auto-select highlighted invoice
       if (highlightId && Array.isArray(invData)) {
         const hi = invData.find((i: Invoice) => i.id === highlightId)
         if (hi) setSelected(hi)
@@ -60,7 +62,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 5000)
+    const interval = setInterval(fetchData, 5000) // poll every 5s
     return () => clearInterval(interval)
   }, [fetchData])
 
@@ -95,19 +97,10 @@ export default function Dashboard() {
 
   const filtered = filter === 'ALL' ? invoices : invoices.filter(i => i.status === filter)
 
-  const fmt = (n: number) => new Intl.NumberFormat('en-US', {
-    style: 'currency', currency: 'USD', minimumFractionDigits: 0
-  }).format(n)
-
-  const confidenceColor = (c: number) => {
-    if (c >= 0.8) return 'text-sage'
-    if (c >= 0.5) return 'text-amber'
-    return 'text-rose'
-  }
+  const fmt = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 }).format(n)
 
   return (
     <div className="min-h-screen bg-ink flex flex-col">
-
       {/* Top nav */}
       <nav className="border-b border-mist/50 px-6 py-3 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
@@ -130,13 +123,13 @@ export default function Dashboard() {
       {stats && (
         <div className="border-b border-mist/30 px-6 py-4 grid grid-cols-4 gap-4 flex-shrink-0">
           {[
-            { label: 'Total Value',   value: fmt(stats.totalValue),                          icon: DollarSign,  color: 'text-azure' },
-            { label: 'Needs Review',  value: String(stats.discrepancy + stats.pending),       icon: AlertTriangle, color: 'text-amber' },
-            { label: 'AI Accuracy',   value: `${Math.round(stats.avgConfidence * 100)}%`,    icon: Shield,      color: 'text-cyan' },
-            { label: 'Auto-matched',  value: `${Math.round(stats.straightThroughRate * 100)}%`, icon: TrendingUp, color: 'text-sage' },
+            { label: 'Total Value', value: fmt(stats.totalValue), icon: DollarSign, color: 'text-azure' },
+            { label: 'Needs Review', value: String(stats.discrepancy + stats.pending), icon: AlertTriangle, color: 'text-amber' },
+            { label: 'AI Accuracy', value: `${Math.round(stats.avgConfidence * 100)}%`, icon: Shield, color: 'text-cyan' },
+            { label: 'Auto-matched', value: `${Math.round(stats.straightThroughRate * 100)}%`, icon: TrendingUp, color: 'text-sage' },
           ].map(({ label, value, icon: Icon, color }) => (
             <div key={label} className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-mist">
+              <div className={`p-2 rounded-lg bg-mist`}>
                 <Icon className={`w-4 h-4 ${color}`} />
               </div>
               <div>
@@ -149,10 +142,8 @@ export default function Dashboard() {
       )}
 
       <div className="flex flex-1 overflow-hidden">
-
         {/* Invoice list */}
         <div className="w-96 flex-shrink-0 border-r border-mist/30 flex flex-col overflow-hidden">
-
           {/* Filter tabs */}
           <div className="px-4 py-3 border-b border-mist/30 flex gap-1 flex-wrap">
             {['ALL', 'DISCREPANCY', 'MATCHED', 'PENDING', 'APPROVED'].map(f => (
@@ -190,7 +181,6 @@ export default function Dashboard() {
                 const cfg = STATUS_CONFIG[inv.status] || STATUS_CONFIG.PENDING
                 const StatusIcon = cfg.icon
                 const isHighlighted = inv.id === highlightId
-                const isLowConfidence = inv.aiConfidence < 0.3
                 return (
                   <button
                     key={inv.id}
@@ -201,12 +191,7 @@ export default function Dashboard() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="flex items-center gap-1">
-                          <p className="font-medium text-snow text-sm truncate">{inv.vendorName}</p>
-                          {isLowConfidence && (
-                            <AlertTriangle className="w-3 h-3 text-amber flex-shrink-0" />
-                          )}
-                        </div>
+                        <p className="font-medium text-snow text-sm truncate">{inv.vendorName}</p>
                         <p className="text-xs text-ghost font-mono truncate">{inv.invoiceNumber}</p>
                       </div>
                       <span className={cfg.className}>
@@ -236,35 +221,15 @@ export default function Dashboard() {
             </div>
           ) : (
             <div className="max-w-2xl space-y-6 animate-fade-in">
-
-              {/* Low confidence warning banner */}
-              {selected.aiConfidence < 0.3 && (
-                <div className="flex items-start gap-3 bg-amber/10 border border-amber/20 rounded-xl px-4 py-3">
-                  <AlertTriangle className="w-4 h-4 text-amber mt-0.5 flex-shrink-0" />
-                  <div>
-                    <p className="text-amber text-sm font-semibold">Low AI Confidence ({Math.round(selected.aiConfidence * 100)}%)</p>
-                    <p className="text-ghost text-xs mt-0.5">
-                      This PDF may be scanned or image-based. Text could not be extracted automatically.
-                      Please verify all fields manually before approving.
-                    </p>
-                  </div>
-                </div>
-              )}
-
               {/* Header */}
               <div className="flex items-start justify-between">
                 <div>
                   <h2 className="font-display text-2xl font-bold text-snow">{selected.vendorName}</h2>
                   <p className="text-ghost font-mono text-sm mt-1">{selected.invoiceNumber}</p>
-                  {selected.vendorEmail && (
-                    <p className="text-ghost text-xs mt-1">{selected.vendorEmail}</p>
-                  )}
                 </div>
                 <div className="text-right">
                   <p className="font-display text-3xl font-bold text-snow">{fmt(selected.totalAmount)}</p>
-                  <p className={`text-xs mt-1 font-medium ${confidenceColor(selected.aiConfidence)}`}>
-                    AI confidence: {Math.round(selected.aiConfidence * 100)}%
-                  </p>
+                  <p className="text-ghost text-xs mt-1">AI confidence: {Math.round(selected.aiConfidence * 100)}%</p>
                 </div>
               </div>
 
@@ -316,7 +281,7 @@ export default function Dashboard() {
                           <p className="text-ghost text-xs">Invoice: {d.invoiceValue} · PO: {d.poValue}</p>
                         </div>
                         <span className={`badge ${
-                          d.severity === 'HIGH'   ? 'bg-rose/20 text-rose' :
+                          d.severity === 'HIGH' ? 'bg-rose/20 text-rose' :
                           d.severity === 'MEDIUM' ? 'bg-amber/20 text-amber' :
                           'bg-ghost/20 text-ghost'
                         }`}>
@@ -329,7 +294,7 @@ export default function Dashboard() {
               )}
 
               {/* Line items */}
-              {selected.lineItems && selected.lineItems.length > 0 && (
+              {selected.lineItems.length > 0 && (
                 <div className="card">
                   <p className="text-ghost text-xs font-semibold uppercase tracking-wider mb-3">Line Items</p>
                   <table className="w-full text-sm">
@@ -358,12 +323,6 @@ export default function Dashboard() {
                   </table>
                 </div>
               )}
-
-              {/* File info */}
-              <div className="flex items-center gap-2 text-ghost text-xs">
-                <Info className="w-3 h-3" />
-                <span>File: {selected.fileName} · Uploaded {new Date(selected.uploadedAt).toLocaleString()}</span>
-              </div>
 
               {/* Actions */}
               {['MATCHED', 'DISCREPANCY', 'PENDING'].includes(selected.status) && (
@@ -401,9 +360,7 @@ export default function Dashboard() {
                   <CheckCircle className="w-6 h-6 text-sage" />
                   <div>
                     <p className="text-snow font-semibold">Approved</p>
-                    <p className="text-ghost text-sm">
-                      By {selected.approvedBy} · {selected.approvedAt ? new Date(selected.approvedAt).toLocaleString() : ''}
-                    </p>
+                    <p className="text-ghost text-sm">By {selected.approvedBy} · {selected.approvedAt ? new Date(selected.approvedAt).toLocaleString() : ''}</p>
                   </div>
                 </div>
               )}
@@ -413,13 +370,10 @@ export default function Dashboard() {
                   <X className="w-6 h-6 text-rose mt-0.5" />
                   <div>
                     <p className="text-snow font-semibold">Rejected</p>
-                    {selected.rejectedReason && (
-                      <p className="text-ghost text-sm mt-1">{selected.rejectedReason}</p>
-                    )}
+                    {selected.rejectedReason && <p className="text-ghost text-sm mt-1">{selected.rejectedReason}</p>}
                   </div>
                 </div>
               )}
-
             </div>
           )}
         </div>
