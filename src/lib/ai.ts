@@ -1,7 +1,7 @@
-import OpenAI from 'openai'
+import Groq from 'groq-sdk'
 import type { Invoice, LineItem, PurchaseOrder, Discrepancy } from './dynamodb'
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
 
 export interface ExtractionResult {
   vendorName: string
@@ -16,9 +16,7 @@ export interface ExtractionResult {
 }
 
 export async function extractInvoiceData(rawText: string): Promise<ExtractionResult> {
-  const prompt = `You are an expert accounts payable AI. Extract structured data from this invoice text.
-
-Return ONLY valid JSON with this exact structure:
+  const prompt = `Extract invoice data and return ONLY valid JSON:
 {
   "vendorName": "string",
   "vendorEmail": "string or null",
@@ -27,33 +25,28 @@ Return ONLY valid JSON with this exact structure:
   "dueDate": "YYYY-MM-DD",
   "totalAmount": number,
   "currency": "USD",
-  "lineItems": [
-    {
-      "description": "string",
-      "quantity": number,
-      "unitPrice": number,
-      "total": number
-    }
-  ],
+  "lineItems": [{"description": "string", "quantity": number, "unitPrice": number, "total": number}],
   "confidence": 0.0 to 1.0
 }
 
-If a field cannot be determined, use reasonable defaults. Set confidence lower for uncertain extractions.
+Invoice:
+${rawText.slice(0, 3000)}`
 
-Invoice text:
----
-${rawText}
----`
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+  const response = await groq.chat.completions.create({
+    model: 'llama3-8b-8192',
     messages: [{ role: 'user', content: prompt }],
-    response_format: { type: 'json_object' },
     temperature: 0.1,
+    max_tokens: 1000,
   })
 
-  const content = response.choices[0].message.content || '{}'
-  const parsed = JSON.parse(content)
+  let parsed: any = {}
+  try {
+    const content = response.choices[0].message.content || '{}'
+    const jsonMatch = content.match(/\{[\s\S]*\}/)
+    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {}
+  } catch {
+    parsed = {}
+  }
 
   return {
     vendorName: parsed.vendorName || 'Unknown Vendor',
@@ -72,26 +65,27 @@ export function matchInvoiceToPO(
   invoice: ExtractionResult,
   purchaseOrders: PurchaseOrder[]
 ): { po: PurchaseOrder | null; discrepancies: Discrepancy[] } {
-  // Find best matching PO by vendor name similarity + amount proximity
   const candidates = purchaseOrders.filter(po => {
-    const vendorSimilar = po.vendorName.toLowerCase().includes(invoice.vendorName.toLowerCase()) ||
+    const vendorSimilar =
+      po.vendorName.toLowerCase().includes(invoice.vendorName.toLowerCase()) ||
       invoice.vendorName.toLowerCase().includes(po.vendorName.toLowerCase())
-    const amountClose = Math.abs(po.totalAmount - invoice.totalAmount) / po.totalAmount < 0.15 // within 15%
+    const amountClose =
+      Math.abs(po.totalAmount - invoice.totalAmount) / (po.totalAmount || 1) < 0.15
     return vendorSimilar || amountClose
   })
 
   if (candidates.length === 0) return { po: null, discrepancies: [] }
 
-  // Pick best match (closest amount)
-  const bestPO = candidates.sort((a, b) =>
-    Math.abs(a.totalAmount - invoice.totalAmount) - Math.abs(b.totalAmount - invoice.totalAmount)
+  const bestPO = candidates.sort(
+    (a, b) =>
+      Math.abs(a.totalAmount - invoice.totalAmount) -
+      Math.abs(b.totalAmount - invoice.totalAmount)
   )[0]
 
   const discrepancies: Discrepancy[] = []
 
-  // Check amount discrepancy
   const amountDiff = Math.abs(bestPO.totalAmount - invoice.totalAmount)
-  const amountDiffPct = amountDiff / bestPO.totalAmount
+  const amountDiffPct = amountDiff / (bestPO.totalAmount || 1)
   if (amountDiffPct > 0.01) {
     discrepancies.push({
       field: 'Total Amount',
@@ -101,7 +95,6 @@ export function matchInvoiceToPO(
     })
   }
 
-  // Check line item count
   if (bestPO.lineItems.length !== invoice.lineItems.length) {
     discrepancies.push({
       field: 'Line Item Count',
@@ -115,19 +108,16 @@ export function matchInvoiceToPO(
 }
 
 export async function generateApprovalSummary(invoice: Invoice): Promise<string> {
-  const prompt = `You are an AP manager AI assistant. Write a concise 2-3 sentence approval summary for this invoice.
-
+  const prompt = `Write a 2-3 sentence AP approval summary for this invoice:
 Invoice: ${invoice.invoiceNumber} from ${invoice.vendorName}
 Amount: $${invoice.totalAmount} ${invoice.currency}
 Status: ${invoice.status}
-Matched PO: ${invoice.matchedPOId || 'None found'}
-Discrepancies: ${invoice.discrepancies?.length || 0} found
-AI Confidence: ${Math.round(invoice.aiConfidence * 100)}%
+Matched PO: ${invoice.matchedPOId || 'None'}
+Discrepancies: ${invoice.discrepancies?.length || 0}
+AI Confidence: ${Math.round(invoice.aiConfidence * 100)}%`
 
-Be factual and direct. Flag any concerns clearly.`
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+  const response = await groq.chat.completions.create({
+    model: 'llama3-8b-8192',
     messages: [{ role: 'user', content: prompt }],
     max_tokens: 150,
     temperature: 0.3,
