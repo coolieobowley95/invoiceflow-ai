@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import slack from "@/lib/slack";
 
 export async function GET() {
@@ -6,7 +8,6 @@ export async function GET() {
 
     channel: "#new-channel",
 
-    // fallback text for notifications/accessibility
     text: "InvoiceFlow AP Agent - New invoice requires approval",
 
     blocks: [
