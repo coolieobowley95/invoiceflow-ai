@@ -1,7 +1,8 @@
-import Groq from 'groq-sdk'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 import type { Invoice, LineItem, PurchaseOrder, Discrepancy } from './dynamodb'
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
 
 export interface ExtractionResult {
   vendorName: string
@@ -15,80 +16,49 @@ export interface ExtractionResult {
   confidence: number
 }
 
-export async function extractInvoiceData(rawText: string): Promise<ExtractionResult> {
+export async function extractInvoiceData(
+  fileBuffer: Buffer,
+  mediaType: string
+): Promise<ExtractionResult> {
   const today = new Date().toISOString().split('T')[0]
   const in30Days = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
 
-  const prompt = `You are an expert invoice data extraction AI. Your job is to find invoice information from any text, even if it is messy, partial, or poorly formatted.
+  const prompt = `You are an invoice data extraction AI. Look carefully at this invoice document and extract all fields.
 
-INSTRUCTIONS:
-- Read the text carefully and extract every piece of invoice data you can find
-- Look for: company names, vendor names, supplier names, bill from, service provider
-- Look for: invoice numbers, reference numbers, invoice ID, bill number
-- Look for: dates in any format (Jan 25 2026, 01/25/2026, 2026-01-25, etc)
-- Look for: dollar amounts, totals, subtotals, amount due, balance due
-- Look for: line items, services, products, descriptions with prices
-- Look for: email addresses near company names
-- Even if the text is short or unclear, extract whatever you can find
-- Set confidence between 0.0 and 1.0 based on how much data you found
-
-Return ONLY a valid JSON object. No explanation, no markdown, no code blocks. Just raw JSON:
+Return ONLY a valid JSON object, no markdown, no explanation, just raw JSON:
 {
-  "vendorName": "the company or person sending the invoice, or Unknown Vendor if not found",
+  "vendorName": "company or person sending the invoice",
   "vendorEmail": "email address or null",
-  "invoiceNumber": "invoice number or reference number found, or INV-${Date.now()} if not found",
-  "invoiceDate": "date in YYYY-MM-DD format or ${today} if not found",
-  "dueDate": "due date in YYYY-MM-DD format or ${in30Days} if not found",
-  "totalAmount": 0,
+  "invoiceNumber": "invoice number or reference number",
+  "invoiceDate": "date in YYYY-MM-DD format or ${today}",
+  "dueDate": "due date in YYYY-MM-DD format or ${in30Days}",
+  "totalAmount": 12500,
   "currency": "USD",
   "lineItems": [
-    {
-      "description": "item or service description",
-      "quantity": 1,
-      "unitPrice": 0,
-      "total": 0
-    }
+    { "description": "item description", "quantity": 1, "unitPrice": 7500, "total": 7500 }
   ],
-  "confidence": 0.5
-}
+  "confidence": 0.95
+}`
 
-INVOICE TEXT TO EXTRACT FROM:
----
-${rawText.slice(0, 4000)}
----
-
-Remember: return ONLY the JSON object, nothing else.`
-
-  const response = await groq.chat.completions.create({
-    model: 'llama-3.1-8b-instant',
-    messages: [
-      {
-        role: 'system',
-        content: 'You are an invoice extraction AI. You always respond with valid JSON only. Never include markdown, code blocks, or explanations. Only output the raw JSON object.'
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        data: fileBuffer.toString('base64'),
+        mimeType: mediaType,
       },
-      {
-        role: 'user',
-        content: prompt
-      }
-    ],
-    temperature: 0.1,
-    max_tokens: 1500,
-  })
+    },
+    prompt,
+  ])
+
+  const text = result.response.text()
 
   let parsed: any = {}
   try {
-    const content = response.choices[0].message.content || '{}'
-    // Strip any accidental markdown code blocks
-    const cleaned = content
-      .replace(/```json/gi, '')
-      .replace(/```/g, '')
-      .trim()
-    // Find the JSON object
+    const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim()
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/)
     parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {}
   } catch (err) {
     console.error('[ai] JSON parse error:', err)
-    parsed = {}
   }
 
   return {
@@ -100,7 +70,7 @@ Remember: return ONLY the JSON object, nothing else.`
     totalAmount: typeof parsed.totalAmount === 'number' ? parsed.totalAmount : 0,
     currency: parsed.currency || 'USD',
     lineItems: Array.isArray(parsed.lineItems) ? parsed.lineItems : [],
-    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.3,
+    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.9,
   }
 }
 
@@ -127,8 +97,8 @@ export function matchInvoiceToPO(
 
   const discrepancies: Discrepancy[] = []
 
-  const amountDiff = Math.abs(bestPO.totalAmount - invoice.totalAmount)
-  const amountDiffPct = amountDiff / (bestPO.totalAmount || 1)
+  const amountDiffPct =
+    Math.abs(bestPO.totalAmount - invoice.totalAmount) / (bestPO.totalAmount || 1)
   if (amountDiffPct > 0.01) {
     discrepancies.push({
       field: 'Total Amount',
@@ -159,12 +129,6 @@ Matched PO: ${invoice.matchedPOId || 'None'}
 Discrepancies: ${invoice.discrepancies?.length || 0}
 AI Confidence: ${Math.round(invoice.aiConfidence * 100)}%`
 
-  const response = await groq.chat.completions.create({
-    model: 'llama-3.1-8b-instant',
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 150,
-    temperature: 0.3,
-  })
-
-  return response.choices[0].message.content || 'Summary unavailable.'
+  const result = await model.generateContent(prompt)
+  return result.response.text() || 'Summary unavailable.'
 }
