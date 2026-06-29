@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai'
 import type { Invoice, LineItem, PurchaseOrder, Discrepancy } from './dynamodb'
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' })
+const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
 
 export interface ExtractionResult {
   vendorName: string
@@ -23,22 +23,27 @@ export async function extractInvoiceData(
   const today = new Date().toISOString().split('T')[0]
   const in30Days = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
 
-  const prompt = `You are an invoice data extraction AI. Look carefully at this invoice document and extract all fields.
+  const prompt = `You are an expert invoice data extraction AI. Look carefully at every part of this invoice document and extract all fields accurately.
 
-Return ONLY a valid JSON object, no markdown, no explanation, just raw JSON:
+Return ONLY a valid JSON object. No explanation, no markdown, no code blocks. Just raw JSON:
 {
-  "vendorName": "company or person sending the invoice",
+  "vendorName": "the company or person sending the invoice",
   "vendorEmail": "email address or null",
   "invoiceNumber": "invoice number or reference number",
-  "invoiceDate": "date in YYYY-MM-DD format or ${today}",
-  "dueDate": "due date in YYYY-MM-DD format or ${in30Days}",
+  "invoiceDate": "date in YYYY-MM-DD format or ${today} if not found",
+  "dueDate": "due date in YYYY-MM-DD format or ${in30Days} if not found",
   "totalAmount": 12500,
   "currency": "USD",
   "lineItems": [
-    { "description": "item description", "quantity": 1, "unitPrice": 7500, "total": 7500 }
+    { "description": "item or service description", "quantity": 1, "unitPrice": 7500, "total": 7500 }
   ],
   "confidence": 0.95
-}`
+}
+
+Important:
+- totalAmount must be a number, not a string
+- Read every line item and include all of them
+- confidence should be 0.9+ if you can clearly read the document`
 
   const result = await model.generateContent([
     {
@@ -51,6 +56,7 @@ Return ONLY a valid JSON object, no markdown, no explanation, just raw JSON:
   ])
 
   const text = result.response.text()
+  console.log('[ai] Gemini raw response:', text.slice(0, 500))
 
   let parsed: any = {}
   try {
