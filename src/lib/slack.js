@@ -44,7 +44,7 @@ async function searchVendorHistory(vendorName) {
 }
 
 // ---------------------------------------------------------------------------
-// Build and post the Block Kit approval message for a processed invoice.
+// Post the Block Kit approval message for a processed invoice.
 // ---------------------------------------------------------------------------
 export async function sendInvoiceToSlack(invoice) {
   const channel = process.env.SLACK_CHANNEL_ID || "#invoices";
@@ -68,6 +68,7 @@ export async function sendInvoiceToSlack(invoice) {
           .join("\n")}`
       : "✅ No discrepancies — matches PO";
 
+  // Real-Time Search — fetch prior vendor messages from workspace
   const vendorHistory = await searchVendorHistory(invoice.vendorName);
 
   const vendorHistoryBlocks = vendorHistory
@@ -105,10 +106,7 @@ export async function sendInvoiceToSlack(invoice) {
             invoice.currency ?? "USD"
           }`,
         },
-        {
-          type: "mrkdwn",
-          text: `*Invoice #*\n${invoice.invoiceNumber}`,
-        },
+        { type: "mrkdwn", text: `*Invoice #*\n${invoice.invoiceNumber}` },
         {
           type: "mrkdwn",
           text: `*AI Confidence*\n${Math.round(
@@ -118,7 +116,9 @@ export async function sendInvoiceToSlack(invoice) {
         { type: "mrkdwn", text: `*Risk Level*\n${riskLabel}` },
         {
           type: "mrkdwn",
-          text: `*PO Match*\n${invoice.matchedPOId ? `✅ ${invoice.matchedPOId}` : "❌ No match"}`,
+          text: `*PO Match*\n${
+            invoice.matchedPOId ? `✅ ${invoice.matchedPOId}` : "❌ No match"
+          }`,
         },
       ],
     },
@@ -177,7 +177,8 @@ export async function sendInvoiceToSlack(invoice) {
 }
 
 // ---------------------------------------------------------------------------
-// Update the original approval message after Approve / Reject is clicked.
+// Update the original message after Approve / Reject is clicked.
+// Replaces the buttons with a decision summary.
 // ---------------------------------------------------------------------------
 export async function updateApprovalMessage({
   channel,
@@ -234,4 +235,50 @@ export async function updateApprovalMessage({
       },
     ],
   });
+}
+
+// ---------------------------------------------------------------------------
+// Send a failure notification when invoice processing crashes.
+// Ensures the team always knows when something needs manual attention.
+// ---------------------------------------------------------------------------
+export async function sendFailureNotification(invoiceId, errorMessage) {
+  const channel = process.env.SLACK_CHANNEL_ID || "#invoices";
+  try {
+    await slack.chat.postMessage({
+      channel,
+      text: `⚠️ Invoice processing failed`,
+      blocks: [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: "⚠️ Invoice Processing Failed",
+          },
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `An invoice could not be processed and needs manual attention.\n\n*Invoice ID:* \`${invoiceId}\`\n*Error:* ${errorMessage}`,
+          },
+        },
+        {
+          type: "context",
+          elements: [
+            {
+              type: "mrkdwn",
+              text: `Failed at ${new Date().toLocaleString("en-US", {
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              })}`,
+            },
+          ],
+        },
+      ],
+    });
+  } catch (err) {
+    console.error("[slack] sendFailureNotification failed:", err?.message);
+  }
 }
