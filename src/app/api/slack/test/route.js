@@ -1,84 +1,43 @@
 export const dynamic = "force-dynamic";
 
-import slack from "@/lib/slack";
+import { listInvoices } from "@/lib/dynamodb";
+import { sendInvoiceToSlack } from "@/lib/slack";
 
 export async function GET() {
+  try {
+    const invoices = await listInvoices();
+    const latest = invoices.find(
+      (i) => i.status !== "PROCESSING" && i.vendorName !== "Processing…"
+    );
 
-  await slack.chat.postMessage({
+    const invoice = latest ?? {
+      id: `demo-${Date.now()}`,
+      uploadedAt: new Date().toISOString(),
+      fileName: "sample-invoice.pdf",
+      vendorName: "Acme Supplies Ltd",
+      invoiceNumber: "INV-2026-0042",
+      invoiceDate: new Date().toISOString().split("T")[0],
+      dueDate: new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0],
+      totalAmount: 12450,
+      currency: "USD",
+      lineItems: [],
+      status: "MATCHED",
+      aiConfidence: 0.87,
+      matchedPOId: "PO-2026-0019",
+      discrepancies: [],
+    };
 
-    channel: "#new-channel",
+    const result = await sendInvoiceToSlack(invoice);
 
-    text: "InvoiceFlow AP Agent - New invoice requires approval",
-
-    blocks: [
-
-      {
-        type: "header",
-        text: {
-          type: "plain_text",
-          text: "🤖 InvoiceFlow AP Agent"
-        }
-      },
-
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text:
-`*New Invoice Requires Approval*
-
-🏢 *Vendor:* Acme Supplies
-
-💰 *Amount:* $12,450 USD
-
-📄 *Invoice:* INV-20491
-
-⚠️ *Risk Level:* Medium
-
-🤖 *AI Recommendation:*
-Approve - Vendor matches previous transactions and no issues were detected.`
-        }
-      },
-
-      {
-        type: "divider"
-      },
-
-      {
-        type: "actions",
-        elements: [
-
-          {
-            type: "button",
-            text: {
-              type: "plain_text",
-              text: "✅ Approve"
-            },
-            style: "primary",
-            action_id: "approve_invoice"
-          },
-
-          {
-            type: "button",
-            text: {
-              type: "plain_text",
-              text: "❌ Reject"
-            },
-            style: "danger",
-            action_id: "reject_invoice"
-          }
-
-        ]
-      }
-
-    ]
-
-  });
-
-
-  return Response.json({
-    success: true,
-    message: "InvoiceFlow Slack approval sent"
-  });
-
+    return Response.json({
+      success: true,
+      message: "Slack approval message sent",
+      usingRealInvoice: !!latest,
+      invoiceId: invoice.id,
+      slackMessageTs: result.ts,
+    });
+  } catch (error) {
+    console.error("[slack/test] Error:", error);
+    return Response.json({ success: false, error: error.message }, { status: 500 });
+  }
 }
