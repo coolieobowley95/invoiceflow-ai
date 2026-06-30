@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { v4 as uuidv4 } from 'uuid'
-import { putInvoice, updateInvoiceStatus, Invoice, listPurchaseOrders } from '@/lib/dynamodb'
+import { putInvoice, updateInvoiceStatus, Invoice, listPurchaseOrders, getInvoice } from '@/lib/dynamodb'
 import { extractInvoiceData, matchInvoiceToPO } from '@/lib/ai'
+import { sendInvoiceToSlack } from '@/lib/slack'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -57,12 +58,46 @@ export async function POST(req: NextRequest) {
       throw new Error((createError as any).message || 'Failed to save invoice record')
     }
 
-    // 2. Send file buffer directly to Gemini vision — works for both PDFs and images
-    console.log('[upload] sending to Gemini vision, file type:', file.type, 'size:', file.size)
-    const extracted = await extractInvoiceData(buffer, file.type)
-    console.log('[upload] Gemini extracted:', JSON.stringify(extracted))
+    // 2. Extract text from PDF or image
+    let rawText = ''
 
-    // 3. Match against purchase orders
+    if (file.type === 'application/pdf') {
+      try {
+        const pdfParse = require('pdf-parse')
+        const parsed = await pdfParse(buffer)
+        rawText = parsed.text?.trim() || ''
+        console.log('[upload] pdf-parse extracted length:', rawText.length)
+        if (rawText.length > 0) {
+          console.log('[upload] pdf text preview:', rawText.slice(0, 300))
+        }
+      } catch (err) {
+        console.error('[upload] pdf-parse threw an error:', err)
+        rawText = ''
+      }
+
+      if (!rawText || rawText.length < 20) {
+        console.log('[upload] pdf text empty — building filename hint for AI')
+        const namePart = file.name
+          .replace(/\.pdf$/i, '')
+          .replace(/[-_]/g, ' ')
+        rawText = `Invoice PDF. Filename: ${namePart}. File size: ${file.size} bytes. No text layer could be extracted from this PDF — it may be a scanned document. Please extract whatever invoice data is possible from the filename and context provided.`
+        console.log('[upload] filename hint:', rawText)
+      }
+
+    } else {
+      const namePart = file.name
+        .replace(/\.(jpg|jpeg|png|webp|tiff)$/i, '')
+        .replace(/[-_]/g, ' ')
+      rawText = `Image invoice. Filename: ${namePart}. File size: ${file.size} bytes. File type: ${file.type}.`
+      console.log('[upload] image hint:', rawText)
+    }
+
+    // 3. Send text to Groq AI for field extraction
+    console.log('[upload] sending to AI, text length:', rawText.length)
+    const extracted = await extractInvoiceData(rawText)
+    console.log('[upload] AI extracted:', JSON.stringify(extracted))
+
+    // 4. Match against purchase orders
     const purchaseOrders = await listPurchaseOrders()
     const { po, discrepancies } = matchInvoiceToPO(extracted, purchaseOrders)
 
@@ -70,7 +105,7 @@ export async function POST(req: NextRequest) {
       ? discrepancies.length > 0 ? 'DISCREPANCY' : 'MATCHED'
       : 'PENDING'
 
-    // 4. Save final result with all extracted data
+    // 5. Save final result with all extracted data
     const final: Invoice = {
       id: invoiceId,
       uploadedAt: now,
@@ -85,6 +120,7 @@ export async function POST(req: NextRequest) {
       vendorEmail: extracted.vendorEmail,
       currency: extracted.currency || 'USD',
       aiConfidence: extracted.confidence,
+      rawText,
       notes: 'COMPLETE',
       ...(po?.id ? { matchedPOId: po.id } : {}),
       ...(discrepancies.length > 0 ? { discrepancies } : {}),
@@ -92,6 +128,12 @@ export async function POST(req: NextRequest) {
 
     const { error: finalError } = await putInvoice(final)
     if (finalError) throw new Error((finalError as any).message)
+
+    // 6. Send real-time Slack approval request with RTS vendor history.
+    // Fire-and-forget — Slack failure must not fail the upload.
+    sendInvoiceToSlack(final).catch((err) => {
+      console.error('[upload] Slack notification failed (non-fatal):', err?.message)
+    })
 
     return NextResponse.json({ invoiceId, message: 'Invoice processed' }, { status: 200 })
 
