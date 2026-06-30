@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { v4 as uuidv4 } from 'uuid'
-import { putInvoice, updateInvoiceStatus, Invoice, listPurchaseOrders, getInvoice } from '@/lib/dynamodb'
-import { extractInvoiceData, matchInvoiceToPO } from '@/lib/ai'
-import { sendInvoiceToSlack } from '@/lib/slack'
+import { putInvoice, updateInvoiceStatus, Invoice, listPurchaseOrders } from '@/lib/dynamodb'
+import { extractInvoiceData, extractInvoiceDataFromImage, matchInvoiceToPO } from '@/lib/ai'
+import { sendInvoiceToSlack, sendFailureNotification } from '@/lib/slack'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -14,6 +14,8 @@ const VALID_TYPES = [
   'image/webp',
   'image/tiff',
 ]
+
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/tiff']
 
 export async function POST(req: NextRequest) {
   const invoiceId = uuidv4()
@@ -27,7 +29,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 })
     }
 
-    if (!VALID_TYPES.some(t => file.type === t || file.type.startsWith(t.split('/')[0]))) {
+    if (!VALID_TYPES.includes(file.type)) {
       return NextResponse.json(
         { error: 'Invalid file type. PDF or image required.' },
         { status: 400 }
@@ -37,7 +39,7 @@ export async function POST(req: NextRequest) {
     const bytes = await file.arrayBuffer()
     const buffer = Buffer.from(bytes)
 
-    // 1. Save skeleton immediately so dashboard shows it right away
+    // 1. Save skeleton immediately so dashboard shows it straight away
     const skeleton: Invoice = {
       id: invoiceId,
       uploadedAt: now,
@@ -58,10 +60,21 @@ export async function POST(req: NextRequest) {
       throw new Error((createError as any).message || 'Failed to save invoice record')
     }
 
-    // 2. Extract text from PDF or image
-    let rawText = ''
+    // 2. Extract invoice data
+    // Images → vision model (reads actual content)
+    // PDFs  → text extraction then Groq
+    let extracted
 
-    if (file.type === 'application/pdf') {
+    const isImage = IMAGE_TYPES.includes(file.type)
+
+    if (isImage) {
+      console.log('[upload] image invoice — using vision extraction:', file.type)
+      const imageBase64 = buffer.toString('base64')
+      extracted = await extractInvoiceDataFromImage(imageBase64, file.type, file.name)
+
+    } else {
+      let rawText = ''
+
       try {
         const pdfParse = require('pdf-parse')
         const parsed = await pdfParse(buffer)
@@ -71,33 +84,25 @@ export async function POST(req: NextRequest) {
           console.log('[upload] pdf text preview:', rawText.slice(0, 300))
         }
       } catch (err) {
-        console.error('[upload] pdf-parse threw an error:', err)
+        console.error('[upload] pdf-parse error:', err)
         rawText = ''
       }
 
       if (!rawText || rawText.length < 20) {
-        console.log('[upload] pdf text empty — building filename hint for AI')
         const namePart = file.name
           .replace(/\.pdf$/i, '')
           .replace(/[-_]/g, ' ')
-        rawText = `Invoice PDF. Filename: ${namePart}. File size: ${file.size} bytes. No text layer could be extracted from this PDF — it may be a scanned document. Please extract whatever invoice data is possible from the filename and context provided.`
-        console.log('[upload] filename hint:', rawText)
+        rawText = `Invoice PDF. Filename: ${namePart}. File size: ${file.size} bytes. No text layer found — may be a scanned document.`
+        console.log('[upload] using filename hint:', rawText)
       }
 
-    } else {
-      const namePart = file.name
-        .replace(/\.(jpg|jpeg|png|webp|tiff)$/i, '')
-        .replace(/[-_]/g, ' ')
-      rawText = `Image invoice. Filename: ${namePart}. File size: ${file.size} bytes. File type: ${file.type}.`
-      console.log('[upload] image hint:', rawText)
+      console.log('[upload] sending to AI, text length:', rawText.length)
+      extracted = await extractInvoiceData(rawText)
     }
 
-    // 3. Send text to Groq AI for field extraction
-    console.log('[upload] sending to AI, text length:', rawText.length)
-    const extracted = await extractInvoiceData(rawText)
     console.log('[upload] AI extracted:', JSON.stringify(extracted))
 
-    // 4. Match against purchase orders
+    // 3. Match against purchase orders
     const purchaseOrders = await listPurchaseOrders()
     const { po, discrepancies } = matchInvoiceToPO(extracted, purchaseOrders)
 
@@ -105,7 +110,7 @@ export async function POST(req: NextRequest) {
       ? discrepancies.length > 0 ? 'DISCREPANCY' : 'MATCHED'
       : 'PENDING'
 
-    // 5. Save final result with all extracted data
+    // 4. Save final record with all extracted data
     const final: Invoice = {
       id: invoiceId,
       uploadedAt: now,
@@ -120,7 +125,6 @@ export async function POST(req: NextRequest) {
       vendorEmail: extracted.vendorEmail,
       currency: extracted.currency || 'USD',
       aiConfidence: extracted.confidence,
-      rawText,
       notes: 'COMPLETE',
       ...(po?.id ? { matchedPOId: po.id } : {}),
       ...(discrepancies.length > 0 ? { discrepancies } : {}),
@@ -129,8 +133,8 @@ export async function POST(req: NextRequest) {
     const { error: finalError } = await putInvoice(final)
     if (finalError) throw new Error((finalError as any).message)
 
-    // 6. Send real-time Slack approval request with RTS vendor history.
-    // Fire-and-forget — Slack failure must not fail the upload.
+    // 5. Send Slack approval request with RTS vendor history
+    // Fire-and-forget — Slack failure must never fail the upload
     sendInvoiceToSlack(final).catch((err) => {
       console.error('[upload] Slack notification failed (non-fatal):', err?.message)
     })
@@ -139,7 +143,13 @@ export async function POST(req: NextRequest) {
 
   } catch (error: any) {
     console.error('[upload] fatal error:', error)
+
+    // Mark the record as failed
     await updateInvoiceStatus(invoiceId, 'PENDING', { notes: 'FAILED' } as any).catch(() => {})
+
+    // Notify Slack so the team knows something went wrong
+    sendFailureNotification(invoiceId, error?.message || 'Unknown error').catch(() => {})
+
     return NextResponse.json({ error: error.message || 'Upload failed' }, { status: 500 })
   }
 }
