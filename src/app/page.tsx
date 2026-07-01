@@ -20,10 +20,9 @@ export default function Home() {
 
       {/* Hero */}
       <section className="max-w-6xl mx-auto px-6 pt-24 pb-20 text-center">
-        {/* Live indicator */}
         <div className="inline-flex items-center gap-2 bg-sage/10 border border-sage/20 rounded-full px-4 py-1.5 mb-8">
           <span className="w-2 h-2 rounded-full bg-sage animate-pulse-slow" />
-          <span className="text-sage text-sm font-medium">Powered by AWS DynamoDB + AI</span>
+          <span className="text-sage text-sm font-medium">Powered by Groq AI + Slack Real-Time Search</span>
         </div>
 
         <h1 className="font-display text-5xl md:text-7xl font-bold text-snow leading-[1.05] mb-6">
@@ -36,7 +35,7 @@ export default function Home() {
 
         <p className="text-ghost text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
           Upload any invoice. Our AI extracts every field, matches it to your purchase orders,
-          flags discrepancies, and routes it for approval — automatically.
+          flags discrepancies, and routes it for one-click approval directly inside Slack.
         </p>
 
         <div className="flex items-center justify-center gap-4 flex-wrap">
@@ -73,7 +72,7 @@ export default function Home() {
             { icon: FileText, title: 'Upload', desc: 'Drop a PDF or image invoice. Any format, any vendor.', color: 'text-azure' },
             { icon: Zap, title: 'Extract', desc: 'AI reads every field: amounts, line items, dates, vendor details.', color: 'text-cyan' },
             { icon: Shield, title: 'Match & Verify', desc: 'Auto-matched to your POs. Discrepancies flagged instantly.', color: 'text-amber' },
-            { icon: CheckCircle, title: 'Approve', desc: 'One-click approval or rejection with a full audit trail.', color: 'text-sage' },
+            { icon: CheckCircle, title: 'Approve in Slack', desc: 'One-click approval or rejection inside Slack with full audit trail.', color: 'text-sage' },
           ].map((step, i) => (
             <div key={step.title} className="card-hover relative">
               <div className="text-xs font-mono text-ghost/50 mb-4">0{i + 1}</div>
@@ -96,8 +95,8 @@ export default function Home() {
               {[
                 { icon: CheckCircle, text: 'PO matching with configurable tolerance thresholds', color: 'text-sage' },
                 { icon: AlertTriangle, text: 'Automatic discrepancy detection with severity levels', color: 'text-amber' },
-                { icon: Shield, text: 'Human-in-the-loop approval for flagged invoices', color: 'text-azure' },
-                { icon: TrendingUp, text: 'Full audit trail stored in AWS DynamoDB', color: 'text-cyan' },
+                { icon: Shield, text: 'Slack Real-Time Search shows vendor history before approval', color: 'text-azure' },
+                { icon: TrendingUp, text: 'Full audit trail stored in Supabase with timestamps', color: 'text-cyan' },
               ].map(({ icon: Icon, text, color }) => (
                 <li key={text} className="flex items-start gap-3">
                   <Icon className={`w-5 h-5 ${color} mt-0.5 flex-shrink-0`} />
@@ -141,7 +140,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="border-t border-mist/30 px-6 py-8 text-center text-ghost text-sm">
-        <p>Built for H0 Hackathon — Vercel + AWS DynamoDB stack</p>
+        <p>Built for the Slack Agent Builder Challenge · Groq + Supabase + Slack RTS</p>
       </footer>
     </main>
   )
