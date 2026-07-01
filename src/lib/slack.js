@@ -1,4 +1,5 @@
 import { WebClient } from "@slack/web-api";
+import { getUserToken } from "./slackOAuth";
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 
@@ -6,39 +7,69 @@ export default slack;
 
 // ---------------------------------------------------------------------------
 // Real-Time Search: look up this vendor's history in the Slack workspace.
-// This is one of the three required hackathon technologies (RTS API).
+// This uses the actual RTS API — assistant.search.context — not the
+// deprecated search.messages method.
+//
+// Token shape matters here: assistant.search.context can be called with a
+// bot token, but only alongside an `action_token` minted from a live
+// message/app_mention event. Since this runs from a background job (right
+// after an invoice upload, not in response to a Slack message), that shape
+// doesn't apply — so this uses a standing *user* token instead, which needs
+// no action_token. That token comes from the one-time OAuth consent flow at
+// /api/slack/oauth/install and is stored in Supabase (see slackOAuth.js).
 // ---------------------------------------------------------------------------
 async function searchVendorHistory(vendorName) {
   if (!vendorName || vendorName === "Unknown Vendor") return null;
+
+  const tokenRow = await getUserToken();
+  if (!tokenRow?.access_token) {
+    console.warn(
+      "[slack] No Real-Time Search token on file yet — visit /api/slack/oauth/install once to connect it."
+    );
+    return null;
+  }
+
   try {
-    const result = await slack.search.messages({
+    const userClient = new WebClient(tokenRow.access_token);
+
+    // assistant.search.context isn't in @slack/web-api's typed helpers yet,
+    // so it's called directly via apiCall (the same mechanism every typed
+    // method uses under the hood).
+    const result = await userClient.apiCall("assistant.search.context", {
       query: `${vendorName} invoice`,
-      count: 3,
+      content_types: ["messages"],
+      channel_types: ["public_channel"],
+      limit: 3,
       sort: "timestamp",
       sort_dir: "desc",
     });
 
-    const matches = result?.messages?.matches ?? [];
+    // Be defensive about the exact response envelope — this is a newer API
+    // and shapes have shifted across rollout stages.
+    const rawMatches = result?.results?.messages ?? result?.messages ?? result?.results ?? [];
+    const matches = Array.isArray(rawMatches) ? rawMatches : [];
     if (matches.length === 0) return null;
 
     const previews = matches.slice(0, 2).map((m) => {
-      const ts = m.ts
-        ? new Date(parseFloat(m.ts) * 1000).toLocaleDateString("en-US", {
+      const text = m.text ?? m.message?.text ?? "";
+      const ts = m.ts ?? m.message?.ts;
+      const dateLabel = ts
+        ? new Date(parseFloat(ts) * 1000).toLocaleDateString("en-US", {
             month: "short",
             day: "numeric",
             year: "numeric",
           })
         : "unknown date";
-      return `• ${ts} — ${m.text?.slice(0, 80) ?? ""}`;
+      return `• ${dateLabel} — ${String(text).slice(0, 80)}`;
     });
 
     return {
       count: matches.length,
       previews,
-      channelName: matches[0]?.channel?.name ?? "unknown",
+      channelName: matches[0]?.channel?.name ?? matches[0]?.channel_name ?? "unknown",
     };
   } catch (err) {
-    console.warn("[slack] RTS vendor search failed:", err?.message);
+    console.warn("[slack] RTS vendor search failed:", err?.data?.error || err?.message);
     return null;
   }
 }
@@ -77,7 +108,7 @@ export async function sendInvoiceToSlack(invoice) {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*🔍 Vendor history (via Slack Search)*\n${vendorHistory.previews.join(
+            text: `*🔍 Vendor history (via Slack Real-Time Search API)*\n${vendorHistory.previews.join(
               "\n"
             )}\n_${vendorHistory.count} message(s) found in #${
               vendorHistory.channelName
